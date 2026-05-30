@@ -1,2 +1,0 @@
-2024-10-06 23:52:02,264 - ERROR - Error setting application icon: bitmap "app_icon.ico" not defined
-2024-10-06 23:52:24,724 - ERROR - Error executing find_orb: Command '['cmd', '/c', 'cd "C:\\Users\\ADM\\Downloads\\find_c64" && fo64 "C:\\Users\\ADM\\Downloads\\find_c64\\obs_2024MK.txt" -e "C:\\Users\\ADM\\Downloads\\find_c64\\efemerides.txt" -E 3,5,24 -C X93 EPHEM_STEPS=10 EPHEM_STEP_SIZE=1h']' returned non-zero exit status 1.

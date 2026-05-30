@@ -214,16 +214,25 @@ def parse_summary(elements_content, eph_content, target_object):
     closest_mag   = 'N/A'
     closest_alt   = 'N/A'
 
+    # The ephemeris produced by the fixed '-E 3,5,24' options ends with a
+    # known 7-column numeric tail:
+    #   [delta, r, mag, "/min, PA, alt, az]
+    # The leading part (date + RA h m s + Dec d m s) has a variable token
+    # count, so we anchor on the END of the line instead of fixed front
+    # indices. The previous code read parts[14] as 'alt', but that column is
+    # actually PA — yielding impossible altitudes like 104.7 deg (the real
+    # altitude is the 2nd-from-last token).
     for line in eph_content.splitlines():
         if not re.match(r'^\d{4}\s+\d{2}\s+\d{2}\s+\d{2}', line):
             continue
         parts = line.split()
-        if len(parts) < 13:
+        if len(parts) < 17:          # date(4)+RA(3)+Dec(3)+7-col tail = 17
             continue
         try:
-            delta = float(parts[10])
-            mag   = parts[12]
-            alt   = parts[14] if len(parts) > 14 else 'N/A'
+            tail  = parts[-7:]       # [delta, r, mag, "/min, PA, alt, az]
+            delta = float(tail[0])
+            mag   = tail[2]
+            alt   = tail[5]          # real altitude (NOT tail[4]=PA)
             date_str = f"{parts[0]}-{parts[1]}-{parts[2]} {parts[3]}h UTC"
             if closest_delta is None or delta < closest_delta:
                 closest_delta = delta
@@ -239,18 +248,55 @@ def parse_summary(elements_content, eph_content, target_object):
         closest_delta_str = f"{closest_delta:.5f} AU  ({ld:.1f} LD)"
 
     # ------------------------------------------------------------------ #
-    # 3. Classify via Tisserand
+    # 3. Classification
+    #     (a) NEO sub-class (Atira/Aten/Apollo/Amor) from orbital elements.
+    #     (b) Dynamical class from the Tisserand parameter RELATIVE TO
+    #         JUPITER (T_J).
+    #
+    # NOTE: the comet/asteroid distinction uses the Tisserand parameter
+    # relative to JUPITER, not Earth. A previous version read 'Tisserand
+    # relative to Earth' and applied Jupiter-family thresholds to it — the
+    # wrong basis, producing misleading labels. Find_Orb does not always
+    # print T_J, so there is an explicit fallback when the line is absent.
     # ------------------------------------------------------------------ #
+
+    tisserand_jup = _get(r'Tisserand relative to Jupiter:\s+([\d.]+)',
+                         elements_content)
+
+    # q and Q derived from a and e (more robust than parsing their own
+    # lines):  q = a(1 - e) (perihelion)   Q = a(1 + e) (aphelion)
+    EARTH_Q = 1.017   # Earth aphelion (AU)
+    EARTH_q = 0.983   # Earth perihelion (AU)
+    neo_subclass = "Unknown"
     try:
-        t_val = float(tisserand)
-        if t_val < 2:
-            obj_class = "Jupiter-family comet (T < 2)"
-        elif t_val < 3:
-            obj_class = "Jupiter-family asteroid / comet candidate (2 ≤ T < 3)"
+        a_val = float(a_au)
+        e_val = float(ecc)
+        q = a_val * (1.0 - e_val)
+        Q = a_val * (1.0 + e_val)
+        if a_val < 1.0 and Q < EARTH_q:
+            neo_subclass = "Atira (orbit interior to Earth's)"
+        elif a_val < 1.0:
+            neo_subclass = "Aten (a < 1 AU, crosses Earth's orbit)"
+        elif q < EARTH_Q:
+            neo_subclass = "Apollo (a > 1 AU, crosses Earth's orbit)"
+        elif q < 1.3:
+            neo_subclass = "Amor (a > 1 AU, approaches but does not cross)"
         else:
-            obj_class = "Asteroid (T ≥ 3)"
+            neo_subclass = "Outside NEO criterion (q > 1.3 AU)"
     except ValueError:
-        obj_class = "Unknown"
+        neo_subclass = "Unknown"
+
+    # Dynamical class from Jupiter Tisserand (T_J)
+    try:
+        tj = float(tisserand_jup)
+        if tj < 2:
+            dyn_class = "Halley-type / long-period comet (T_J < 2)"
+        elif tj < 3:
+            dyn_class = "Jupiter-family comet (2 <= T_J < 3)"
+        else:
+            dyn_class = "Asteroid (T_J >= 3)"
+    except ValueError:
+        dyn_class = "Unavailable (Find_Orb did not report T_J)"
 
     # ------------------------------------------------------------------ #
     # 4. Flags
@@ -294,7 +340,8 @@ def parse_summary(elements_content, eph_content, target_object):
 
     blocks += [
         (f"Object          : {target_object}\n", S),
-        (f"Classification  : {obj_class}\n", S),
+        (f"NEO sub-class   : {neo_subclass}\n", S),
+        (f"Dynamical class : {dyn_class}\n", S),
         (f"\n", S),
         (f"── Physical ──────────────────────────────\n", S),
         (f"Est. diameter   : {diameter} m  (10% albedo assumed)\n", S),
@@ -332,12 +379,13 @@ def parse_summary(elements_content, eph_content, target_object):
 
     blocks += [
         (f"Tisserand (T_E) : {tisserand}\n", S),
+        (f"Tisserand (T_J) : {tisserand_jup}\n", S),
         (f"\n", S),
-        (f"── Close Approach ────────────────────────\n", S),
-        (f"Closest date    : {closest_date}\n", S),
+        (f"── Min. Distance in Ephemeris Window ─────\n", S),
+        (f"Time (min dist) : {closest_date}\n", S),
         (f"Min. distance   : {closest_delta_str}\n", S),
-        (f"Mag. at C/A     : {closest_mag}\n", S),
-        (f"Alt. at C/A     : {closest_alt}°  (observatory)\n", S),
+        (f"Magnitude       : {closest_mag}\n", S),
+        (f"Altitude        : {closest_alt}°  (observatory)\n", S),
         (f"Enc. velocity   : {enc_vel} km/s\n", S),
         (f"\n", S),
         (f"── Observations ──────────────────────────\n", S),
@@ -403,6 +451,14 @@ class FindOrbApp:
                     foreground=C['entry_fg'], insertcolor=C['fg'],
                     bordercolor=C['border'], font=('Segoe UI', 10))
         s.map('TEntry', fieldbackground=[('focus', '#4a4a4a')])
+
+        # Validation-error style. In ttk.Entry the visible fill comes from
+        # the style (fieldbackground), not the widget's 'background' option —
+        # which is why the old direct .configure(background=...) had no
+        # visible effect. We use a dedicated style instead.
+        s.configure('Error.TEntry', fieldbackground=C['error'],
+                    foreground=C['entry_fg'], insertcolor=C['fg'],
+                    bordercolor=C['border'], font=('Segoe UI', 10))
 
         s.configure('TButton', background=C['accent'], foreground='#ffffff',
                     bordercolor=C['accent'], font=('Segoe UI', 10),
@@ -672,29 +728,44 @@ class FindOrbApp:
         obj_name = self.target_object_entry.get()
         obs_code = self.obs_code_entry.get()
 
+        # --- Object name ---
         if obj_name == '' or obj_name == self.target_object_placeholder:
-            self.target_object_entry.configure(background=C['error'])
+            self.target_object_entry.configure(style='Error.TEntry')
+            valid = False
+        elif not re.match(r'^[A-Za-z0-9\s\-]+$', obj_name):
+            self.target_object_entry.configure(style='Error.TEntry')
+            messagebox.showerror("Error",
+                                 "Invalid object name. Enter a valid designation.")
             valid = False
         else:
-            if not re.match(r'^[A-Za-z0-9\s\-]+$', obj_name):
-                self.target_object_entry.configure(background=C['error'])
-                messagebox.showerror("Error",
-                                     "Invalid object name. Enter a valid designation.")
-                valid = False
-            else:
-                self.target_object_entry.configure(background=C['entry_bg'])
+            self.target_object_entry.configure(style='TEntry')
 
+        # --- Observatory code ---
         if obs_code == '' or obs_code == self.obs_code_placeholder:
-            self.obs_code_entry.configure(background=C['error'])
+            self.obs_code_entry.configure(style='Error.TEntry')
+            valid = False
+        elif not re.match(r'^[A-Za-z0-9]{3}$', obs_code):
+            self.obs_code_entry.configure(style='Error.TEntry')
+            messagebox.showerror("Error",
+                                 "Observatory code must be 3 alphanumeric characters.")
             valid = False
         else:
-            if not re.match(r'^[A-Za-z0-9]{3}$', obs_code):
-                self.obs_code_entry.configure(background=C['error'])
-                messagebox.showerror("Error",
-                                     "Observatory code must be 3 alphanumeric characters.")
-                valid = False
-            else:
-                self.obs_code_entry.configure(background=C['entry_bg'])
+            self.obs_code_entry.configure(style='TEntry')
+
+        # --- Ephemeris steps ---
+        # BUG FIX: validate HERE, before submit() sets _processing=True.
+        # Previously a non-integer value was caught late (inside the worker
+        # thread) via an early 'return' that skipped the finally block,
+        # leaving _processing stuck at True — silently locking the Submit
+        # button for the rest of the session.
+        eph = self.eph_steps_entry.get().strip()
+        if not eph.isdigit() or int(eph) <= 0:
+            self.eph_steps_entry.configure(style='Error.TEntry')
+            messagebox.showerror("Error",
+                                 "Ephemeris steps must be a positive integer.")
+            valid = False
+        else:
+            self.eph_steps_entry.configure(style='TEntry')
 
         return valid
 
@@ -713,16 +784,8 @@ class FindOrbApp:
 
     def process_submission(self):
         object_type_value = self.object_type.get()
-        target_object = self.target_object_entry.get()
-        obs_code = self.obs_code_entry.get()
-        eph_steps = self.eph_steps_entry.get()
-
-        try:
-            eph_steps_int = int(eph_steps)
-        except ValueError:
-            self.root.after(0, lambda: messagebox.showerror(
-                "Error", "Ephemeris Steps must be an integer."))
-            return
+        target_object = self.target_object_entry.get().strip()
+        obs_code = self.obs_code_entry.get().strip()
 
         self.root.after(0, lambda: self.submit_button.configure(state='disabled'))
         self.root.after(0, lambda: self.progress.pack(pady=4))
@@ -731,32 +794,50 @@ class FindOrbApp:
             text="Fetching observations…"))
 
         try:
+            # eph_steps was already validated as a positive integer in
+            # validate_entries(). int() here is just a conversion — it lives
+            # INSIDE the try/finally, so any unexpected failure still releases
+            # _processing and re-enables the button.
+            eph_steps_int = int(self.eph_steps_entry.get())
+
             obs80_string = get_observations(object_type_value, target_object)
 
-            # Filter observations to keep only lines belonging to the requested object.
-            # Known MPC API bug: the get-obs-neocp endpoint occasionally returns observations
-            # for unrelated objects mixed into the payload of a requested object (e.g. querying
-            # C45YPL1 returned 2 lines for TF26C14). This is inconsistent with the MPC website,
-            # which shows only the correct observations for each object. The filter below
-            # discards any lines whose identifier (OBS80 columns 1-12) does not match the
-            # requested object, correcting for this API misbehaviour.
-            # OBS80 format: columns 1-12 are the object identifier.
+            # --- Observation contamination filter ---
+            # Applies ONLY to the get-obs-neocp endpoint: it occasionally
+            # mixes lines from other objects into the payload (e.g. querying
+            # C45YPL1 returned 2 lines for TF26C14). On that endpoint the
+            # trksub appears as raw text in the designation columns, so a
+            # literal comparison works.
+            #
+            # For NEO we do NOT filter: get-obs already returns only the
+            # requested object, and OBS80 columns 1-12 hold the PACKED
+            # designation, which never equals the human-readable form
+            # (e.g. "2024 MK" -> "K24M00K"). Filtering by literal equality
+            # here removed ALL of a NEO's observations, producing an empty
+            # file and making fo64.exe return exit status 1.
             all_lines = obs80_string.splitlines()
-            filtered_lines = [
-                line for line in all_lines
-                if line[:12].strip() == target_object.strip()
-            ]
-            removed = len(all_lines) - len(filtered_lines)
-            if removed > 0:
-                foreign_ids = set(
-                    line[:12].strip() for line in all_lines
-                    if line[:12].strip() != target_object.strip() and line.strip()
-                )
-                logger.warning(
-                    f"OBS80 for {target_object}: filtered out {removed} lines "
-                    f"belonging to other objects: {foreign_ids}"
-                )
-            obs80_string = '\n'.join(filtered_lines)
+
+            if object_type_value == "NEOCP":
+                filtered_lines = [ln for ln in all_lines
+                                  if ln[:12].strip() == target_object]
+                non_blank = [ln for ln in all_lines if ln.strip()]
+                removed = len(non_blank) - len(filtered_lines)
+                if removed > 0:
+                    foreign_ids = {ln[:12].strip() for ln in non_blank
+                                   if ln[:12].strip() != target_object}
+                    logger.warning(
+                        f"NEOCP {target_object}: removed {removed} line(s) "
+                        f"belonging to other objects: {foreign_ids}")
+                obs80_string = '\n'.join(filtered_lines)
+            else:
+                obs80_string = '\n'.join(ln for ln in all_lines if ln.strip())
+
+            if not obs80_string.strip():
+                # No valid observations -> clear message instead of the cryptic
+                # "find_orb exit 1". The substring below routes to the friendly
+                # handler in the except block.
+                raise KeyError("Error processing response data. "
+                               "No valid observations returned.")
 
             logger.debug(f"OBS80 content for {target_object}:\n{obs80_string}")
 
@@ -863,11 +944,13 @@ class FindOrbApp:
         if messagebox.askyesno("Confirmation", "Reset all fields?"):
             self.target_object_entry.delete(0, tk.END)
             self.target_object_entry.insert(0, self.target_object_placeholder)
-            self.target_object_entry.configure(foreground=C['fg_dim'])
+            self.target_object_entry.configure(foreground=C['fg_dim'], style='TEntry')
 
+            self.obs_code_entry.configure(style='TEntry')
             self.obs_code_entry.delete(0, tk.END)
             self._load_saved_obs_code()
 
+            self.eph_steps_entry.configure(style='TEntry')
             self.eph_steps_entry.delete(0, tk.END)
             self.eph_steps_entry.insert(0, "10")
 
@@ -1038,7 +1121,7 @@ class FindOrbApp:
             return
         designation = values[desig_idx]
         self.target_object_entry.configure(foreground=C['entry_fg'],
-                                           background=C['entry_bg'])
+                                           style='TEntry')
         self.target_object_entry.delete(0, tk.END)
         self.target_object_entry.insert(0, designation)
         self.object_type.set("NEOCP")
