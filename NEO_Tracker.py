@@ -187,7 +187,7 @@ def fetch_project_pluto_ephemeris(target_object, obs_code="X93", eph_steps=10, s
     headers = {
         "User-Agent": (
             "NEO Tracker / Project Pluto remote "
-            "(contact: andre.brossel@gmail.com)"
+            "NEO Tracker/3.0 (https://github.com/Anduin-source/NEOS_Tracker)"
         )
     }
 
