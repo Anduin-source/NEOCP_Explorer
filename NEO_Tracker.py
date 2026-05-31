@@ -1,5 +1,3 @@
-import subprocess
-import os
 import requests
 import tkinter as tk
 import tkinter.ttk as ttk
@@ -7,10 +5,20 @@ from tkinter import scrolledtext, messagebox, font
 import re
 import logging
 import threading
-import argparse
-import configparser
-import sys
+import math
+from datetime import datetime
 import pandas as pd
+
+# Optional: used only to compute topocentric Alt/Az from Project Pluto RA/Dec.
+# The application still runs without astropy; Alt/Az will simply be unavailable.
+try:
+    from astropy.coordinates import SkyCoord, EarthLocation, AltAz
+    from astropy.time import Time
+    import astropy.units as u
+    ASTROPY_AVAILABLE = True
+except Exception:
+    ASTROPY_AVAILABLE = False
+
 
 # Configure logging to log to both file and console
 logger = logging.getLogger(__name__)
@@ -26,8 +34,10 @@ formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(messag
 file_handler.setFormatter(formatter)
 console_handler.setFormatter(formatter)
 
-logger.addHandler(file_handler)
-logger.addHandler(console_handler)
+# Avoid duplicate log entries if this module is reloaded in an IDE/session.
+if not logger.handlers:
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
 
 
 # ---------------------------------------------------------------------------
@@ -87,124 +97,652 @@ class Tooltip:
         self.tooltip_window = None
 
 
-def get_observations(object_type_value, target_object):
-    """Retrieves observations from the Minor Planet Center API."""
-    if object_type_value == "NEO":
-        url = "https://data.minorplanetcenter.net/api/get-obs"
-        payload = {"desigs": [target_object], "output_format": ["OBS80"]}
-    elif object_type_value == "NEOCP":
-        url = "https://data.minorplanetcenter.net/api/get-obs-neocp"
-        payload = {"trksubs": [target_object], "output_format": ["OBS80"]}
-    else:
-        raise ValueError("Invalid option for object type.")
+
+
+# ---------------------------------------------------------------------------
+# Project Pluto remote ephemeris provider
+# ---------------------------------------------------------------------------
+
+PROJECT_PLUTO_URL = "https://www.projectpluto.com/cgi-bin/fo/fo_serve.cgi"
+LD_PER_AU = 389.17  # mean lunar distances per astronomical unit
+
+
+def project_pluto_uncertainty_to_degrees(value):
+    """Convert Project Pluto/Find_Orb ephemeris uncertainty to degrees.
+
+    Project Pluto may report the ephemeris uncertainty with different suffixes:
+      - d  : degrees, for very large uncertainties, e.g. 40d
+      - m  : arcminutes, e.g. 3.6m
+      - "  : arcseconds, e.g. 2728"
+      - no suffix: treated as arcseconds, which is how some pseudo-MPEC
+        text appears after HTML conversion/parsing.
+
+    The UI displays a single normalized unit, degrees, to avoid mixing
+    values like 40d and 2728" in the same column.
+    """
+    if value is None:
+        return None
+
+    s = str(value).strip()
+    if not s or s.upper() == 'N/A':
+        return None
+
+    # Normalize typographic prime characters that may appear in copied HTML.
+    s = s.replace('″', '"').replace('”', '"').replace('′', "'").replace('’', "'")
 
     try:
-        response = requests.get(url, json=payload)
+        lower = s.lower()
+        if lower.endswith('d'):
+            return float(lower[:-1])
+        if lower.endswith('m') or lower.endswith("'"):
+            return float(lower[:-1]) / 60.0
+        if lower.endswith('s') or lower.endswith('"'):
+            return float(lower[:-1]) / 3600.0
+
+        # Project Pluto often emits bare numeric values for arcseconds.
+        return float(lower) / 3600.0
+    except ValueError:
+        return None
+
+
+def format_uncertainty_degrees(value):
+    """Return uncertainty normalized to degrees for table display."""
+    deg = project_pluto_uncertainty_to_degrees(value)
+    if deg is None:
+        return str(value).strip() if value is not None else ''
+    if deg >= 10:
+        return f"{deg:.1f}"
+    if deg >= 1:
+        return f"{deg:.2f}"
+    return f"{deg:.3f}"
+
+
+class ProjectPlutoError(Exception):
+    """Raised when Project Pluto returns a page that cannot be used as an ephemeris."""
+
+
+def fetch_project_pluto_ephemeris(target_object, obs_code="X93", eph_steps=10, step_size="1h"):
+    """
+    Fetches ephemerides from Project Pluto's online Find_Orb server.
+
+    Works for both NEOCP tracklets and known minor-planet designations.
+    This is the only calculation engine used by this no-local-Find_Orb build.
+    """
+    params = {
+        "obj_name": target_object,
+        "year": "now",
+        "n_steps": int(eph_steps),
+        "stepsize": step_size,
+        "mpc_code": obs_code,
+        "faint_limit": 99,
+        "ephem_type": 0,
+        "sigmas": "on",
+        "element_center": -2,
+        "epoch": "default",
+        "resids": 0,
+        "language": "e",
+        "file_no": 0,
+    }
+
+    headers = {
+        "User-Agent": (
+            "NEO Tracker / Project Pluto remote "
+            "(contact: andre.brossel@gmail.com)"
+        )
+    }
+
+    try:
+        response = requests.get(
+            PROJECT_PLUTO_URL,
+            params=params,
+            headers=headers,
+            timeout=30,
+        )
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
-        logger.error(f"Request error: {e}")
-        raise requests.exceptions.RequestException(f"Request error: {e}")
+        logger.error(f"Project Pluto request error: {e}")
+        raise requests.exceptions.RequestException(
+            f"Project Pluto request error: {e}"
+        )
 
-    try:
-        data = response.json()
-    except ValueError:
-        logger.error("Error decoding JSON response.")
-        raise ValueError("Error decoding JSON response.")
-
-    try:
-        obs80_string = data[0]['OBS80']
-        return obs80_string
-    except (KeyError, IndexError):
-        logger.error("Error processing response data.")
-        raise KeyError("Error processing response data. Check if the object name is correct.")
+    return response.text
 
 
-def run_find_orb(obs_file, obs_code, find_orb_path, eph_steps):
-    """Executes the find_orb program with the specified parameters."""
-    ephemeris_output_path = os.path.join(find_orb_path, 'efemerides.txt')
-    elements_output_path = os.path.join(find_orb_path, 'elements.txt')
-
-    executable = os.path.join(find_orb_path, 'fo64.exe')
-    if not os.path.exists(executable):
-        raise FileNotFoundError(f"fo64.exe not found at: {executable}")
-
-    command = [
-        executable, obs_file,
-        '-e', ephemeris_output_path,
-        '-E', '3,5,24',
-        '-C', obs_code,
-        f'EPHEM_STEPS={eph_steps}',
-        'EPHEM_STEP_SIZE=1h'
-    ]
-
-    try:
-        subprocess.run(command, cwd=find_orb_path, check=True)
-
-        if os.path.exists(ephemeris_output_path):
-            with open(ephemeris_output_path, 'r') as f:
-                eph_content = f.read()
-        else:
-            raise FileNotFoundError("efemerides.txt was not found.")
-
-        if os.path.exists(elements_output_path):
-            with open(elements_output_path, 'r') as f:
-                elements_content = f.read()
-        else:
-            raise FileNotFoundError("elements.txt was not found.")
-
-        return elements_content, eph_content
-
-    except subprocess.CalledProcessError as e:
-        raise Exception(f"Error executing find_orb: {e}")
+def _extract_html_comments(html_text):
+    """Extracts hidden Project Pluto metadata comments from the HTML."""
+    return "\n".join(
+        c.strip() for c in re.findall(r"<!--(.*?)-->", html_text, flags=re.S)
+        if c.strip()
+    )
 
 
-def delete_temporary_files(files):
-    """Deletes temporary files."""
-    for file in files:
+# Observatory coordinates used for local Alt/Az after Project Pluto returns RA/Dec.
+# Longitude is degrees East. 313.6047 E = 46.3953 W.
+# Add more observatories here later if needed.
+OBSERVATORY_COORDS = {
+    "X93": {
+        "name": "Munhoz Observatory",
+        "lat_deg": -22.628914,
+        "lon_deg": 313.6047,
+        "height_m": 1078.766,
+    },
+}
+
+
+def _html_to_readable_text(html_text):
+    """Converts Project Pluto's simple HTML pseudo-MPEC into readable visible text."""
+    import html as html_module
+
+    # Remove hidden comments from visible text. They are kept separately as
+    # advanced metadata, not mixed into the main orbital-elements display.
+    text = re.sub(r"<!--.*?-->", "", html_text, flags=re.S)
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</p\s*>", "\n", text)
+    text = re.sub(r"(?i)</pre\s*>", "\n", text)
+    text = re.sub(r"(?i)<li\s*>", "\n- ", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html_module.unescape(text)
+    text = "\n".join(line.rstrip() for line in text.splitlines())
+    return text
+
+def _clean_project_pluto_error_excerpt(readable_text):
+    """Returns a compact, user-facing excerpt from a failed Project Pluto page.
+
+    Project Pluto/Find_Orb may return HTTP 200 with an HTML page describing
+    the problem instead of a machine-readable error.  The visible text can also
+    include CSS/style artifacts.  This helper removes those artifacts and keeps
+    the operational message, usually beginning with 'Problem reading
+    observations'.
+    """
+    lines = []
+    skip_css = False
+
+    for raw in readable_text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+
+        lower = line.lower()
+
+        # Drop common CSS/style artifacts that can appear after stripping tags.
+        if lower.startswith(('.neocp', '.whtext')) or '{' in line or '}' in line:
+            skip_css = True
+            if '}' in line:
+                skip_css = False
+            continue
+        if skip_css:
+            if '}' in line:
+                skip_css = False
+            continue
+
+        # Drop generic headings/navigation that are not useful in an error box.
+        if lower in {'ephemeris generator', 'pseudo-mpec'}:
+            continue
+        if lower.startswith('click here') or lower.startswith('orbit simulator'):
+            continue
+
+        lines.append(line)
+
+    # Prefer the actual Find_Orb/Project Pluto error paragraph when present.
+    start_idx = 0
+    for i, line in enumerate(lines):
+        if 'problem reading observations' in line.lower():
+            start_idx = i
+            break
+        if 'no objects found' in line.lower():
+            start_idx = i
+            break
+
+    useful = lines[start_idx:start_idx + 12]
+    cleaned = []
+    for line in useful:
+        if len(line) > 180:
+            line = line[:177] + '...'
+        cleaned.append(line)
+
+    return "\n".join(cleaned) or "No readable server message returned."
+
+
+def _section_between(text, start_marker, end_marker=None):
+    """Returns a text section from start_marker up to end_marker."""
+    start = text.find(start_marker)
+    if start == -1:
+        return ""
+    if end_marker:
+        end = text.find(end_marker, start + len(start_marker))
+        if end != -1:
+            return text[start:end].strip()
+    return text[start:].strip()
+
+
+def _parse_project_pluto_ephemeris_rows(eph_text):
+    """Parse Project Pluto ephemeris rows into dictionaries.
+
+    Project Pluto can return two slightly different visible formats:
+
+    Daily step:
+      YYYY MM DD  RA_h RA_m RA_s  Dec_d Dec_m Dec_s  delta r elong mag sig PA
+
+    Hourly/sub-day step:
+      YYYY MM DD HH  RA_h RA_m RA_s  Dec_d Dec_m Dec_s  delta r elong mag sig PA
+
+    The previous v3 parser only handled the daily form and a HH:MM token. With
+    stepsize=1h, Project Pluto emits a standalone HH column, so RA/Dec were
+    shifted and Alt/Az could not be computed. This parser detects that form.
+    """
+    rows = []
+
+    for line in eph_text.splitlines():
+        stripped = line.strip()
+        if not re.match(r"^\d{4}\s+\d{2}\s+\d{2}\s+", stripped):
+            continue
+
+        parts = stripped.split()
+        if len(parts) < 15:
+            continue
+
         try:
-            if os.path.exists(file):
-                os.remove(file)
+            year, month, day = parts[0], parts[1], parts[2]
+            idx = 3
+            time_utc = "00:00"
+
+            # Case A: explicit HH:MM or HH:MM:SS token.
+            if idx < len(parts) and re.match(r"^\d{1,2}:\d{2}(:\d{2})?$", parts[idx]):
+                time_utc = parts[idx][:5]
+                idx += 1
+
+            # Case B: Project Pluto hourly output has a standalone HH column.
+            # Example:
+            # 2026 05 31 18  19 01 52.377  -40 12 50.42 ...
+            # If parts[7] starts with +/-, then parts[4:7] are RA and parts[7]
+            # is Dec degrees; therefore parts[3] is the hour.
+            elif (
+                len(parts) >= 16
+                and re.match(r"^\d{1,2}$", parts[3])
+                and parts[7][0] in "+-"
+            ):
+                hour = int(parts[3])
+                if 0 <= hour <= 23:
+                    time_utc = f"{hour:02d}:00"
+                    idx = 4
+
+            ra = f"{parts[idx]} {parts[idx+1]} {parts[idx+2]}"
+            dec = f"{parts[idx+3]} {parts[idx+4]} {parts[idx+5]}"
+            delta = float(parts[idx+6])
+            r = float(parts[idx+7])
+            elong = float(parts[idx+8])
+            mag = float(parts[idx+9])
+            sig = parts[idx+10]
+            pa = int(float(parts[idx+11]))
+
+            rows.append({
+                "date": f"{year}-{month}-{day}",
+                "time": time_utc,
+                "ra": ra,
+                "dec": dec,
+                "delta": delta,
+                "r": r,
+                "elong": elong,
+                "mag": mag,
+                "sig": sig,
+                "pa": pa,
+                "alt": None,
+                "az": None,
+                "airmass": None,
+                "rate": None,
+                "motion_pa": None,
+            })
         except Exception as e:
-            logger.error(f"Could not delete file {file}: {e}")
+            logger.debug(f"Could not parse Project Pluto ephemeris line: {line!r}; {e}")
+            continue
+
+    return rows
+
+def _compute_altaz_for_rows(rows, obs_code):
+    """Adds Alt/Az/Airmass to Project Pluto rows when astropy and coordinates exist."""
+    if not ASTROPY_AVAILABLE:
+        return "Alt/Az not computed: astropy is not installed."
+
+    code = (obs_code or "").strip().upper()
+    info = OBSERVATORY_COORDS.get(code)
+    if not info:
+        return f"Alt/Az not computed: coordinates for observatory {code} are not in the local table."
+
+    location = EarthLocation(
+        lat=info["lat_deg"] * u.deg,
+        lon=info["lon_deg"] * u.deg,
+        height=info["height_m"] * u.m,
+    )
+
+    for row in rows:
+        try:
+            # Convert RA/Dec strings to astropy coordinates.
+            rah, ram, ras = row["ra"].split()
+            decd, decm, decs = row["dec"].split()
+            coord = SkyCoord(
+                f"{rah}h{ram}m{ras}s {decd}d{decm}m{decs}s",
+                frame="icrs",
+            )
+
+            t = Time(f"{row['date']}T{row['time']}", scale="utc")
+            altaz = coord.transform_to(AltAz(obstime=t, location=location))
+            row["alt"] = float(altaz.alt.deg)
+            row["az"] = float(altaz.az.deg)
+
+            # sec(z) approximation is acceptable for display; avoid values
+            # below/near the horizon.
+            if row["alt"] > 5:
+                import math
+                z_rad = math.radians(90.0 - row["alt"])
+                row["airmass"] = 1.0 / math.cos(z_rad)
+        except Exception as e:
+            logger.debug(f"Could not compute Alt/Az for row {row}: {e}")
+    return None
 
 
-def parse_summary(elements_content, eph_content, target_object):
+
+
+def _ra_to_degrees(ra_text):
+    """Convert RA string 'HH MM SS.s' to decimal degrees."""
+    h, m, s = [float(x) for x in str(ra_text).split()]
+    return 15.0 * (h + m / 60.0 + s / 3600.0)
+
+
+def _dec_to_degrees(dec_text):
+    """Convert Dec string '+DD MM SS.s' or '-DD MM SS.s' to decimal degrees."""
+    d_s, m_s, s_s = str(dec_text).split()
+    sign = -1.0 if d_s.startswith('-') else 1.0
+    d = abs(float(d_s))
+    m = float(m_s)
+    s = float(s_s)
+    return sign * (d + m / 60.0 + s / 3600.0)
+
+
+def _row_datetime_utc(row):
+    """Return a naive UTC datetime for an ephemeris row."""
+    return datetime.strptime(f"{row['date']} {row['time']}", "%Y-%m-%d %H:%M")
+
+
+def _angular_sep_and_pa(ra1_deg, dec1_deg, ra2_deg, dec2_deg):
+    """Return angular separation in arcsec and position angle in degrees.
+
+    PA is measured east of north, matching the usual astronomical convention
+    used for apparent motion PA in ephemerides.
     """
-    Parses Find_Orb elements and ephemeris output to produce a human-readable
-    summary of the key physical and observational properties of the object.
+    ra1 = math.radians(ra1_deg)
+    dec1 = math.radians(dec1_deg)
+    ra2 = math.radians(ra2_deg)
+    dec2 = math.radians(dec2_deg)
+    dra = ra2 - ra1
 
-    Sources:
-      - elements_content : raw text from elements.txt (Find_Orb output)
-      - eph_content      : raw text from efemerides.txt (Find_Orb output)
-      - target_object    : designation string (for display)
+    # Great-circle separation.
+    cos_sep = (
+        math.sin(dec1) * math.sin(dec2)
+        + math.cos(dec1) * math.cos(dec2) * math.cos(dra)
+    )
+    cos_sep = max(-1.0, min(1.0, cos_sep))
+    sep_rad = math.acos(cos_sep)
 
-    Returns a list of (text, tag) tuples where tag is one of:
-      'summary'         — normal green text
-      'summary_warning' — orange/red for PHA and hyperbolic flags
+    # Position angle from point 1 to point 2, east of north.
+    y = math.sin(dra) * math.cos(dec2)
+    x = (
+        math.cos(dec1) * math.sin(dec2)
+        - math.sin(dec1) * math.cos(dec2) * math.cos(dra)
+    )
+    pa_deg = (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
+    return math.degrees(sep_rad) * 3600.0, pa_deg
+
+
+def _compute_apparent_motion_for_rows(rows):
+    """Add apparent sky motion to ephemeris rows.
+
+    Project Pluto's pseudo-MPEC table used here provides the ephemeris
+    uncertainty and its PA, but not the apparent motion rate.  We compute the
+    apparent motion from successive RA/Dec positions.  Interior rows use a
+    centered difference; the first and last rows use forward/backward
+    differences.  Units are arcsec/min.
+    """
+    if len(rows) < 2:
+        return
+
+    try:
+        coords = [(_ra_to_degrees(r['ra']), _dec_to_degrees(r['dec'])) for r in rows]
+        times = [_row_datetime_utc(r) for r in rows]
+    except Exception as e:
+        logger.debug(f"Could not prepare apparent-motion calculation: {e}")
+        return
+
+    for i, row in enumerate(rows):
+        try:
+            if i == 0:
+                j1, j2 = 0, 1
+            elif i == len(rows) - 1:
+                j1, j2 = len(rows) - 2, len(rows) - 1
+            else:
+                j1, j2 = i - 1, i + 1
+
+            dt_min = abs((times[j2] - times[j1]).total_seconds()) / 60.0
+            if dt_min <= 0:
+                continue
+
+            sep_arcsec, pa_deg = _angular_sep_and_pa(
+                coords[j1][0], coords[j1][1], coords[j2][0], coords[j2][1]
+            )
+            rate = sep_arcsec / dt_min
+            row['rate'] = rate
+            row['motion_pa'] = pa_deg
+        except Exception as e:
+            logger.debug(f"Could not compute apparent motion for row {row}: {e}")
+            continue
+
+def _format_project_pluto_ephemeris(eph_raw, obs_code):
+    """Builds a clean ephemeris table enhanced with Alt/Az and apparent motion."""
+    rows = _parse_project_pluto_ephemeris_rows(eph_raw)
+    if not rows:
+        return eph_raw
+
+    altaz_note = _compute_altaz_for_rows(rows, obs_code)
+    _compute_apparent_motion_for_rows(rows)
+
+    title = "Project Pluto ephemerides"
+    m = re.search(r"Ephemerides for.*", eph_raw)
+    if m:
+        title = m.group(0).strip()
+
+    lines = []
+    lines.append(title)
+    if altaz_note:
+        lines.append(altaz_note)
+    else:
+        lines.append(f"Alt/Az computed locally for observatory {obs_code.upper()}.")
+    lines.append("Apparent motion computed locally from successive RA/Dec positions.")
+    lines.append("")
+    lines.append(
+        "Date UTC   Time   RA             Dec            delta    r       elong   mag   rate   motPA unc_deg uncPA Alt    Az    Air"
+    )
+    lines.append(
+        "---------  -----  ------------   ------------   -------  ------  ------  ----  ------  ----- ------- ----- -----  -----  ----"
+    )
+
+    for row in rows:
+        alt = f"{row['alt']:5.1f}" if row["alt"] is not None else "  N/A"
+        az = f"{row['az']:5.1f}" if row["az"] is not None else "  N/A"
+        air = f"{row['airmass']:4.2f}" if row["airmass"] is not None else " N/A"
+        unc_deg = format_uncertainty_degrees(row['sig'])
+        rate = f"{row['rate']:6.2f}" if row.get('rate') is not None else "   N/A"
+        mot_pa = f"{row['motion_pa']:5.1f}" if row.get('motion_pa') is not None else "  N/A"
+        lines.append(
+            f"{row['date']}  {row['time']:<5}  "
+            f"{row['ra']:<12}   {row['dec']:<12}   "
+            f"{row['delta']:7.5f}  {row['r']:6.4f}  {row['elong']:6.1f}  "
+            f"{row['mag']:4.1f}  {rate}  {mot_pa}  "
+            f"{unc_deg:>7} {row['pa']:5d}  {alt}  {az}  {air}"
+        )
+
+    return "\n".join(lines)
+
+def _parse_project_pluto_station_names(station_text):
+    """Builds {MPC_code: station_name} from Project Pluto Station data."""
+    names = {}
+    for line in station_text.splitlines():
+        line = line.strip()
+        m = re.match(r"^\(([A-Za-z0-9]{3})\)\s+(.+?)(?:\s+\([NS][\d.]+\s+[EW][\d.]+\)|\s{2,}|$)", line)
+        if m:
+            code = m.group(1).upper()
+            name = " ".join(m.group(2).split())
+            names[code] = name
+    return names
+
+
+def _format_project_pluto_observations(obs_raw, station_text):
+    """Appends the observatory name beside each OBS80 astrometry line."""
+    station_names = _parse_project_pluto_station_names(station_text)
+    if not obs_raw.strip():
+        return obs_raw
+
+    out = []
+    for line in obs_raw.splitlines():
+        raw = line.rstrip()
+        stripped = raw.strip()
+        if not stripped or stripped.lower().startswith("astrometry"):
+            out.append(raw)
+            continue
+
+        # In the readable Project Pluto pseudo-MPEC, the reporting MPC code is
+        # normally the final 3 alphanumeric characters of each astrometry line.
+        m = re.search(r"([A-Za-z0-9]{3})\s*$", stripped)
+        if m:
+            code = m.group(1).upper()
+            station = station_names.get(code)
+            if station:
+                out.append(f"{raw}    [{code} — {station}]")
+                continue
+        out.append(raw)
+
+    if station_names:
+        out.append("")
+        out.append("Observatory codes:")
+        for code in sorted(station_names):
+            out.append(f"  {code} — {station_names[code]}")
+
+    return "\n".join(out)
+
+def split_project_pluto_output(html_text, obs_code="X93"):
+    """Splits Project Pluto pseudo-MPEC into UI blocks.
+
+    Returns:
+      elements_content  - clean orbital elements + residuals, without hidden dump
+      eph_content       - clean/enhanced ephemeris table
+      obs_content       - astrometry only
+      advanced_content  - hidden Project Pluto metadata for optional display
+    """
+    readable = _html_to_readable_text(html_text)
+    hidden_metadata = _extract_html_comments(html_text)
+
+    if "Ephemerides for" not in readable:
+        logger.error("Project Pluto response did not contain an ephemeris table.")
+        logger.debug("Project Pluto response snippet:\n%s", readable[:2000])
+
+        # Project Pluto/Find_Orb usually returns HTTP 200 even for search
+        # failures; the failure is described in the HTML/text itself.  Keep a
+        # compact, readable snippet for the user and the full text in app.log.
+        server_msg = _clean_project_pluto_error_excerpt(readable)
+
+        raise ProjectPlutoError(
+            "Project Pluto did not return an ephemeris table.\n\n"
+            "Possible causes:\n"
+            "• object designation was not found in MPC/NEOCP data;\n"
+            "• object exists, but Project Pluto could not retrieve valid observations;\n"
+            "• observatory code is invalid;\n"
+            "• Project Pluto/MPC service is temporarily unavailable.\n\n"
+            f"Server message excerpt:\n{server_msg}"
+        )
+
+    obs_raw = _section_between(readable, "Astrometry:", "Station data:")
+    station_content = _section_between(readable, "Station data:", "Orbital elements:")
+    obs_content = _format_project_pluto_observations(obs_raw, station_content)
+    elements_content = _section_between(
+        readable,
+        "Orbital elements:",
+        "Residuals in arcseconds:"
+    )
+    residuals_content = _section_between(
+        readable,
+        "Residuals in arcseconds:",
+        "Ephemerides for"
+    )
+    eph_raw = _section_between(readable, "Ephemerides for")
+
+    if residuals_content:
+        elements_content = (elements_content + "\n\n" + residuals_content).strip()
+
+    eph_content = _format_project_pluto_ephemeris(eph_raw, obs_code)
+
+    advanced_content = ""
+    if hidden_metadata:
+        advanced_content = "Hidden Project Pluto metadata:\n" + hidden_metadata
+
+    return elements_content, eph_content, obs_content, advanced_content
+
+
+def infer_object_category(target_object, obs_content="", advanced_content="", neocp_designations=None):
+    """Infer whether the submitted object is a current NEOCP candidate or a known object."""
+    target = (target_object or "").strip().upper()
+    neocp_set = {str(x).strip().upper() for x in (neocp_designations or set())}
+
+    if target and target in neocp_set:
+        return "NEOCP candidate (current MPC NEOCP list)"
+
+    combined = f"{obs_content}\n{advanced_content}"
+    if "VNEOCP" in combined or "NEOCP" in combined:
+        return "NEOCP candidate"
+
+    return "Known object / MPC designation"
+
+def parse_summary(elements_content, eph_content, target_object, object_category="Unknown"):
+    """
+    Parses Find_Orb / Project Pluto elements and ephemeris output to produce
+    a human-readable summary.
+
+    This version supports both:
+      - local Find_Orb output, with altitude/azimuth columns;
+      - Project Pluto pseudo-MPEC output, without altitude/azimuth but with
+        useful hidden metadata in HTML comments.
     """
 
-    def _get(pattern, text, group=1, default='N/A'):
-        m = re.search(pattern, text)
+    def _get(pattern, text, group=1, default='N/A', flags=0):
+        m = re.search(pattern, text, flags)
         return m.group(group).strip() if m else default
 
-    # ------------------------------------------------------------------ #
-    # 1. Parse elements_content
-    # ------------------------------------------------------------------ #
+    metadata_text = elements_content + "\n" + eph_content
 
-    diameter  = _get(r'Diameter\s+([\d.]+)\s+meters', elements_content)
-    enc_vel   = _get(r'Earth encounter velocity\s+([\d.]+)\s+km/s', elements_content)
-    moid      = _get(r'Earth MOID[:\s]+([\d.]+)', elements_content)
-    score     = _get(r'Score:\s+([\d.]+)', elements_content)
-    obs_used  = _get(r'(\d+)\s+of\s+\d+\s+observations', elements_content)
-    obs_total = _get(r'\d+\s+of\s+(\d+)\s+observations', elements_content)
-    obs_arc   = _get(r'\d+\s+of\s+\d+\s+observations\s+[\d\w. ]+\(([\d.]+\s+hr)\)',
-                     elements_content)
+    # ------------------------------------------------------------------ #
+    # 1. Parse orbital / physical metadata
+    # ------------------------------------------------------------------ #
+    diameter  = _get(r'Diameter\s+([\d.]+)\s+meters', metadata_text)
+    enc_vel   = _get(r'Earth encounter velocity\s+([\d.]+)\s+km/s', metadata_text)
+    moid      = _get(r'Earth MOID[:\s]+([\d.]+)', metadata_text)
+    score     = _get(r'Score:\s+([\d.]+)', metadata_text)
+
     perihelion = _get(r'Perihelion\s+(\d{4}\s+\w+\s+[\d.]+)', elements_content)
     ecc        = _get(r'\be\s+([\d.]+)', elements_content)
     incl       = _get(r'Incl\.\s+([\d.]+)', elements_content)
     a_au       = _get(r'\ba\s+([\d.]+)', elements_content)
-    tisserand  = _get(r'Tisserand relative to Earth:\s+([\d.]+)', elements_content)
+    tisserand  = _get(r'Tisserand relative to Earth:\s+([\d.]+)', metadata_text)
+    tisserand_jup = _get(r'Tisserand relative to Jupiter:\s+([\d.]+)', metadata_text)
     h_mag      = _get(r'\bH\s+([\d.]+)', elements_content)
+
+    # Observations: local Find_Orb and Project Pluto use different wording.
+    obs_used  = _get(r'(\d+)\s+of\s+\d+\s+observations', elements_content)
+    obs_total = _get(r'\d+\s+of\s+(\d+)\s+observations', elements_content)
+    obs_arc   = _get(r'\d+\s+of\s+\d+\s+observations\s+[\d\w. ]+\(([\d.]+\s+hr)\)',
+                     elements_content)
+
+    if obs_used == 'N/A':
+        obs_used = _get(r'From\s+(\d+)\s+observations', elements_content)
+        obs_total = obs_used
+        obs_arc = _get(r'From\s+\d+\s+observations\s+.*?\(([\d.]+\s+min)\)',
+                       elements_content)
 
     # ------------------------------------------------------------------ #
     # 2. Find closest approach in ephemeris table
@@ -213,58 +751,119 @@ def parse_summary(elements_content, eph_content, target_object):
     closest_delta = None
     closest_mag   = 'N/A'
     closest_alt   = 'N/A'
+    closest_rate  = 'N/A'
+    closest_mot_pa = 'N/A'
 
-    # The ephemeris produced by the fixed '-E 3,5,24' options ends with a
-    # known 7-column numeric tail:
-    #   [delta, r, mag, "/min, PA, alt, az]
-    # The leading part (date + RA h m s + Dec d m s) has a variable token
-    # count, so we anchor on the END of the line instead of fixed front
-    # indices. The previous code read parts[14] as 'alt', but that column is
-    # actually PA — yielding impossible altitudes like 104.7 deg (the real
-    # altitude is the 2nd-from-last token).
+    first_date = 'N/A'
+    first_delta = None
+    first_r = 'N/A'
+    first_elong = 'N/A'
+
+    # Project Pluto enhanced table generated by _format_project_pluto_ephemeris:
+    #   YYYY-MM-DD HH:MM RA_h RA_m RA_s Dec_d Dec_m Dec_s delta r elong mag sig PA alt az air
+    # Local Find_Orb table:
+    #   YYYY MM DD HH RA_h RA_m RA_s Dec_d Dec_m Dec_s delta r mag motion PA alt az
     for line in eph_content.splitlines():
-        if not re.match(r'^\d{4}\s+\d{2}\s+\d{2}\s+\d{2}', line):
+        sline = line.strip()
+        if not sline:
             continue
-        parts = line.split()
-        if len(parts) < 17:          # date(4)+RA(3)+Dec(3)+7-col tail = 17
-            continue
+
         try:
-            tail  = parts[-7:]       # [delta, r, mag, "/min, PA, alt, az]
-            delta = float(tail[0])
-            mag   = tail[2]
-            alt   = tail[5]          # real altitude (NOT tail[4]=PA)
-            date_str = f"{parts[0]}-{parts[1]}-{parts[2]} {parts[3]}h UTC"
+            if re.match(r'^\d{4}-\d{2}-\d{2}\s+', sline):
+                # Enhanced Project Pluto table.
+                parts = sline.split()
+                if len(parts) >= 19:
+                    date_str = f"{parts[0]} {parts[1]} UTC"
+                    # Enhanced v15 columns:
+                    # date time RA(3) Dec(3) delta r elong mag rate motPA unc PA alt az air
+                    delta = float(parts[8])
+                    r_val = parts[9]
+                    elong_val = parts[10]
+                    mag = parts[11]
+                    apparent_rate = parts[12]
+                    motion_pa = parts[13]
+                    alt = parts[16]
+                elif len(parts) >= 17:
+                    date_str = f"{parts[0]} {parts[1]} UTC"
+                    # Enhanced v14 columns:
+                    # date time RA(3) Dec(3) delta r elong mag unc PA alt az air
+                    delta = float(parts[8])
+                    r_val = parts[9]
+                    elong_val = parts[10]
+                    mag = parts[11]
+                    apparent_rate = 'N/A'
+                    motion_pa = 'N/A'
+                    alt = parts[14]
+                else:
+                    continue
+            elif re.match(r'^\d{4}\s+\d{2}\s+\d{2}\s+\d{2}', sline):
+                # Local Find_Orb table from '-E 3,5,24'.
+                parts = sline.split()
+                if len(parts) < 17:
+                    continue
+                tail = parts[-7:]       # [delta, r, mag, motion, PA, alt, az]
+                delta = float(tail[0])
+                r_val = tail[1]
+                elong_val = 'N/A'
+                mag = tail[2]
+                apparent_rate = tail[3]
+                motion_pa = tail[4]
+                alt = tail[5]
+                date_str = f"{parts[0]}-{parts[1]}-{parts[2]} {parts[3]}h UTC"
+            elif re.match(r'^\d{4}\s+\d{2}\s+\d{2}\s+', sline):
+                # Raw Project Pluto pseudo-MPEC table, kept as fallback.
+                parts = sline.split()
+                if len(parts) < 15:
+                    continue
+                delta = float(parts[9])
+                r_val = parts[10]
+                elong_val = parts[11]
+                mag = parts[12]
+                apparent_rate = 'N/A'
+                motion_pa = 'N/A'
+                alt = 'N/A'
+                date_str = f"{parts[0]}-{parts[1]}-{parts[2]} UTC"
+            else:
+                continue
+
+            if first_delta is None:
+                first_date = date_str
+                first_delta = delta
+                first_r = r_val
+                first_elong = elong_val
+
             if closest_delta is None or delta < closest_delta:
                 closest_delta = delta
                 closest_date  = date_str
                 closest_mag   = mag
                 closest_alt   = alt
+                closest_rate  = apparent_rate
+                closest_mot_pa = motion_pa
         except (ValueError, IndexError):
             continue
 
     closest_delta_str = 'N/A'
     if closest_delta is not None:
-        ld = closest_delta * 389.17
+        ld = closest_delta * LD_PER_AU
         closest_delta_str = f"{closest_delta:.5f} AU  ({ld:.1f} LD)"
+
+    first_delta_str = 'N/A'
+    if first_delta is not None:
+        first_delta_str = f"{first_delta:.5f} AU  ({first_delta * LD_PER_AU:.1f} LD)"
+
+    try:
+        first_r_str = f"{float(first_r):.4f} AU"
+    except (TypeError, ValueError):
+        first_r_str = 'N/A'
+
+    try:
+        first_elong_str = f"{float(first_elong):.1f}°"
+    except (TypeError, ValueError):
+        first_elong_str = 'N/A'
 
     # ------------------------------------------------------------------ #
     # 3. Classification
-    #     (a) NEO sub-class (Atira/Aten/Apollo/Amor) from orbital elements.
-    #     (b) Dynamical class from the Tisserand parameter RELATIVE TO
-    #         JUPITER (T_J).
-    #
-    # NOTE: the comet/asteroid distinction uses the Tisserand parameter
-    # relative to JUPITER, not Earth. A previous version read 'Tisserand
-    # relative to Earth' and applied Jupiter-family thresholds to it — the
-    # wrong basis, producing misleading labels. Find_Orb does not always
-    # print T_J, so there is an explicit fallback when the line is absent.
     # ------------------------------------------------------------------ #
-
-    tisserand_jup = _get(r'Tisserand relative to Jupiter:\s+([\d.]+)',
-                         elements_content)
-
-    # q and Q derived from a and e (more robust than parsing their own
-    # lines):  q = a(1 - e) (perihelion)   Q = a(1 + e) (aphelion)
     EARTH_Q = 1.017   # Earth aphelion (AU)
     EARTH_q = 0.983   # Earth perihelion (AU)
     neo_subclass = "Unknown"
@@ -286,7 +885,6 @@ def parse_summary(elements_content, eph_content, target_object):
     except ValueError:
         neo_subclass = "Unknown"
 
-    # Dynamical class from Jupiter Tisserand (T_J)
     try:
         tj = float(tisserand_jup)
         if tj < 2:
@@ -296,24 +894,21 @@ def parse_summary(elements_content, eph_content, target_object):
         else:
             dyn_class = "Asteroid (T_J >= 3)"
     except ValueError:
-        dyn_class = "Unavailable (Find_Orb did not report T_J)"
+        dyn_class = "Unavailable (T_J not reported)"
 
     # ------------------------------------------------------------------ #
     # 4. Flags
     # ------------------------------------------------------------------ #
-    # PHA: MOID < 0.05 AU and H < 22
     try:
         pha = float(moid) < 0.05 and float(h_mag) < 22
     except ValueError:
         pha = False
 
-    # Hyperbolic / interstellar: e >= 1
     try:
         hyperbolic = float(ecc) >= 1.0
     except ValueError:
         hyperbolic = False
 
-    # Earth-crossing: MOID < 0.05 AU (regardless of size)
     try:
         earth_crossing = float(moid) < 0.05
     except ValueError:
@@ -324,10 +919,8 @@ def parse_summary(elements_content, eph_content, target_object):
     # ------------------------------------------------------------------ #
     S = 'summary'
     W = 'summary_warning'
-
     blocks = []
 
-    # Warning flags at the top — most prominent
     if hyperbolic:
         blocks.append(("⚠  HYPERBOLIC ORBIT (e ≥ 1) — POSSIBLE INTERSTELLAR OBJECT\n", W))
     if pha:
@@ -340,8 +933,8 @@ def parse_summary(elements_content, eph_content, target_object):
 
     blocks += [
         (f"Object          : {target_object}\n", S),
+        (f"Object category : {object_category}\n", S),
         (f"NEO sub-class   : {neo_subclass}\n", S),
-        (f"Dynamical class : {dyn_class}\n", S),
         (f"\n", S),
         (f"── Physical ──────────────────────────────\n", S),
         (f"Est. diameter   : {diameter} m  (10% albedo assumed)\n", S),
@@ -352,7 +945,6 @@ def parse_summary(elements_content, eph_content, target_object):
         (f"Eccentricity    : {ecc}", S),
     ]
 
-    # Inline hyperbolic flag next to eccentricity
     if hyperbolic:
         blocks.append(("  ← hyperbolic\n", W))
     else:
@@ -369,53 +961,187 @@ def parse_summary(elements_content, eph_content, target_object):
     else:
         blocks.append(("\n", S))
 
-    blocks += [
-        (f"PHA             : {'YES' if pha else 'No'}", S),
-    ]
+    blocks += [(f"PHA             : {'YES' if pha else 'No'}", S)]
     if pha:
         blocks.append(("  ⚠\n", W))
     else:
         blocks.append(("\n", S))
 
+    blocks.append((f"Tisserand (T_E) : {tisserand}\n", S))
+    if tisserand_jup != 'N/A':
+        blocks.append((f"Tisserand (T_J) : {tisserand_jup}\n", S))
+
     blocks += [
-        (f"Tisserand (T_E) : {tisserand}\n", S),
-        (f"Tisserand (T_J) : {tisserand_jup}\n", S),
+        (f"\n", S),
+        (f"── Geometry at First Ephemeris Line ──────\n", S),
+        (f"Time            : {first_date}\n", S),
+        (f"Distance Δ      : {first_delta_str}\n", S),
+        (f"Solar distance r: {first_r_str}\n", S),
+        (f"Elongation      : {first_elong_str}\n", S),
         (f"\n", S),
         (f"── Min. Distance in Ephemeris Window ─────\n", S),
         (f"Time (min dist) : {closest_date}\n", S),
         (f"Min. distance   : {closest_delta_str}\n", S),
         (f"Magnitude       : {closest_mag}\n", S),
-        (f"Altitude        : {closest_alt}°  (observatory)\n", S),
+        (f"Altitude        : {closest_alt}\n", S),
+        (f"App. motion     : {closest_rate} arcsec/min\n", S),
+        (f"Motion PA       : {closest_mot_pa}°\n", S),
         (f"Enc. velocity   : {enc_vel} km/s\n", S),
         (f"\n", S),
         (f"── Observations ──────────────────────────\n", S),
         (f"Used / total    : {obs_used} / {obs_total}\n", S),
         (f"Observed arc    : {obs_arc}\n", S),
-        (f"NEO score       : {score}\n", S),
+        (f"Project Pluto score : {score}\n", S),
     ]
 
     return blocks
 
 
-class FindOrbApp:
+def parse_ephemeris_table_for_ui(eph_content):
+    """Extract ephemeris rows for the Treeview.
+
+    Delta is stored internally in AU for summary calculations.
+    Project Pluto uncertainty is normalized to degrees. Apparent motion is
+    computed locally in the formatted table and displayed as arcsec/min plus
+    motion PA.
+    """
+
+    def delta_au_to_ld(value):
+        try:
+            return f"{float(value) * LD_PER_AU:.1f}"
+        except (TypeError, ValueError):
+            return ""
+
+    rows = []
+    for line in eph_content.splitlines():
+        sline = line.strip()
+        if not sline:
+            continue
+        try:
+            if re.match(r'^\d{4}-\d{2}-\d{2}\s+', sline):
+                parts = sline.split()
+                if len(parts) >= 19:
+                    # v15 enhanced Project Pluto table:
+                    # date time RA(3) Dec(3) delta r elong mag rate motPA unc uncPA alt az air
+                    delta_au = parts[8]
+                    rows.append({
+                        'utc': f"{parts[0]} {parts[1]}",
+                        'ra': f"{parts[2]} {parts[3]} {parts[4]}",
+                        'dec': f"{parts[5]} {parts[6]} {parts[7]}",
+                        'delta_ld': delta_au_to_ld(delta_au),
+                        'delta_au': delta_au,
+                        'r': parts[9],
+                        'elong': parts[10],
+                        'mag': parts[11],
+                        'rate': parts[12],
+                        'motion_pa': parts[13],
+                        'unc': parts[14],
+                        'unc_pa': parts[15],
+                        'alt': parts[16],
+                        'az': parts[17],
+                        'air': parts[18],
+                    })
+                elif len(parts) >= 17:
+                    # v14 enhanced Project Pluto table:
+                    # date time RA(3) Dec(3) delta r elong mag unc PA alt az air
+                    delta_au = parts[8]
+                    rows.append({
+                        'utc': f"{parts[0]} {parts[1]}",
+                        'ra': f"{parts[2]} {parts[3]} {parts[4]}",
+                        'dec': f"{parts[5]} {parts[6]} {parts[7]}",
+                        'delta_ld': delta_au_to_ld(delta_au),
+                        'delta_au': delta_au,
+                        'r': parts[9],
+                        'elong': parts[10],
+                        'mag': parts[11],
+                        'rate': '',
+                        'motion_pa': '',
+                        'unc': parts[12],
+                        'unc_pa': parts[13],
+                        'alt': parts[14],
+                        'az': parts[15],
+                        'air': parts[16],
+                    })
+            elif re.match(r'^\d{4}\s+\d{2}\s+\d{2}\s+\d{2}', sline):
+                # Legacy/local Find_Orb style. Tail = [delta, r, mag, motion, PA, alt, az]
+                parts = sline.split()
+                if len(parts) < 17:
+                    continue
+                tail = parts[-7:]
+                delta_au = tail[0]
+                rows.append({
+                    'utc': f"{parts[0]}-{parts[1]}-{parts[2]} {parts[3]}:00",
+                    'ra': " ".join(parts[4:7]),
+                    'dec': " ".join(parts[7:10]),
+                    'delta_ld': delta_au_to_ld(delta_au),
+                    'delta_au': delta_au,
+                    'r': tail[1],
+                    'elong': '',
+                    'mag': tail[2],
+                    'rate': tail[3],
+                    'motion_pa': tail[4],
+                    'unc': '',
+                    'unc_pa': '',
+                    'alt': tail[5],
+                    'az': tail[6],
+                    'air': '',
+                })
+        except Exception as e:
+            logger.debug(f"Could not parse ephemeris UI row: {line!r}; {e}")
+            continue
+    return rows
+
+def extract_compact_orbital_elements(elements_content):
+    """Builds a compact orbital-elements block for the Results tab."""
+    def _get(pattern, text, group=1, default='N/A'):
+        m = re.search(pattern, text)
+        return m.group(group).strip() if m else default
+
+    a = _get(r'\ba\s+([\d.]+)', elements_content)
+    e = _get(r'\be\s+([\d.]+)', elements_content)
+    inc = _get(r'Incl\.\s+([\d.]+)', elements_content)
+    q = _get(r'\bq\s+([\d.]+)', elements_content)
+    Q = _get(r'\bQ\s+([\d.]+)', elements_content)
+    h = _get(r'\bH\s+([\d.]+)', elements_content)
+    moid = _get(r'Earth MOID[:\s]+([\d.]+)', elements_content)
+    peri = _get(r'Perihelion\s+(\d{4}\s+\w+\s+[\d.]+)', elements_content)
+    node = _get(r'Node\s+([\d.]+)', elements_content)
+    argp = _get(r'Peri\.\s+([\d.]+)', elements_content)
+    n = _get(r'\bn\s+([\d.]+)', elements_content)
+
+    return (
+        f"a        : {a} AU\n"
+        f"e        : {e}\n"
+        f"i        : {inc}°\n"
+        f"q        : {q} AU\n"
+        f"Q        : {Q} AU\n"
+        f"H        : {h}\n"
+        f"MOID Ea  : {moid} AU\n"
+        f"Perihel. : {peri}\n"
+        f"Node     : {node}°\n"
+        f"Arg peri : {argp}°\n"
+        f"n        : {n} deg/day\n"
+    )
+
+
+class NEOTrackerApp:
     """Main application — split-pane layout with integrated NEOCP panel."""
 
-    def __init__(self, root, find_orb_path):
+    def __init__(self, root):
         self.root = root
         self.root.title("NEO Tracker  |  Ephemeris Calculator")
         self.root.geometry("1400x800")
         self.root.configure(bg=C['bg'])
         self.root.minsize(900, 600)
 
-        self.find_orb_path = find_orb_path
-        self.validate_find_orb_path()
         self._processing = False
+        self.neocp_designations = set()
 
         self._apply_theme()
         self.create_layout()
         self.create_menu()
         self.create_status_bar()
-        self._load_saved_obs_code()
+        self._set_default_obs_code()
 
         # Load NEOCP panel automatically on startup
         self.root.after(300, self._start_neocp_load)
@@ -498,6 +1224,17 @@ class FindOrbApp:
 
         s.configure('TSeparator', background=C['border'])
 
+
+        # Notebook/results tabs — styled to match the dark application theme.
+        s.configure('TNotebook', background=C['panel'], borderwidth=0, tabmargins=(0, 4, 0, 0))
+        s.configure('TNotebook.Tab', background=C['panel_alt'], foreground=C['fg_dim'],
+                    bordercolor=C['border'], lightcolor=C['panel_alt'], darkcolor=C['panel_alt'],
+                    padding=(14, 7), font=('Segoe UI', 9, 'bold'))
+        s.map('TNotebook.Tab',
+              background=[('selected', C['accent']), ('active', C['border'])],
+              foreground=[('selected', '#ffffff'), ('active', C['fg_header'])],
+              bordercolor=[('selected', C['accent']), ('active', C['border'])])
+
     # ------------------------------------------------------------------
     # Layout
     # ------------------------------------------------------------------
@@ -562,23 +1299,12 @@ class FindOrbApp:
         form_frame.pack(fill='x', padx=14, pady=(12, 6))
         form_frame.columnconfigure(1, weight=1)
 
-        # Object type
-        ttk.Label(form_frame, text="Object type:",
+        # Object designation — one Project Pluto workflow for known objects and NEOCP tracklets
+        ttk.Label(form_frame, text="Object designation:",
                   style='Header.TLabel').grid(row=0, column=0, sticky='w', pady=5)
-        self.object_type = tk.StringVar(value="NEO")
-        radio_frame = ttk.Frame(form_frame, style='Panel.TFrame')
-        radio_frame.grid(row=0, column=1, sticky='w', padx=(6, 0))
-        ttk.Radiobutton(radio_frame, text="NEO",
-                        variable=self.object_type, value="NEO").pack(side='left', padx=(0, 14))
-        ttk.Radiobutton(radio_frame, text="NEOCP",
-                        variable=self.object_type, value="NEOCP").pack(side='left')
-
-        # Object name
-        ttk.Label(form_frame, text="Object name:",
-                  style='Header.TLabel').grid(row=1, column=0, sticky='w', pady=5)
         self.target_object_entry = ttk.Entry(form_frame, font=('Segoe UI', 10))
-        self.target_object_entry.grid(row=1, column=1, sticky='ew', padx=(6, 0))
-        self.target_object_placeholder = "e.g. 2021 PDC"
+        self.target_object_entry.grid(row=0, column=1, sticky='ew', padx=(6, 0))
+        self.target_object_placeholder = "e.g. 99942, Apophis, 2024 MK, A11D0Xd"
         self.target_object_entry.insert(0, self.target_object_placeholder)
         self.target_object_entry.configure(foreground=C['fg_dim'])
         self.target_object_entry.bind("<FocusIn>",
@@ -587,13 +1313,14 @@ class FindOrbApp:
         self.target_object_entry.bind("<FocusOut>",
             lambda e: self.add_placeholder(e, self.target_object_entry,
                                            self.target_object_placeholder))
-        Tooltip(self.target_object_entry, "Enter the object designation (e.g. 2021 PDC)")
+        Tooltip(self.target_object_entry,
+                "Enter a known object name/number or a current NEOCP designation")
 
         # Observatory code
         ttk.Label(form_frame, text="Observatory code:",
-                  style='Header.TLabel').grid(row=2, column=0, sticky='w', pady=5)
+                  style='Header.TLabel').grid(row=1, column=0, sticky='w', pady=5)
         self.obs_code_entry = ttk.Entry(form_frame, font=('Segoe UI', 10), width=12)
-        self.obs_code_entry.grid(row=2, column=1, sticky='w', padx=(6, 0))
+        self.obs_code_entry.grid(row=1, column=1, sticky='w', padx=(6, 0))
         self.obs_code_placeholder = "e.g. X93"
         self.obs_code_entry.insert(0, self.obs_code_placeholder)
         self.obs_code_entry.configure(foreground=C['fg_dim'])
@@ -609,15 +1336,15 @@ class FindOrbApp:
 
         # Ephemeris steps
         ttk.Label(form_frame, text="Ephemeris steps:",
-                  style='Header.TLabel').grid(row=3, column=0, sticky='w', pady=5)
+                  style='Header.TLabel').grid(row=2, column=0, sticky='w', pady=5)
         self.eph_steps_entry = ttk.Entry(form_frame, font=('Segoe UI', 10), width=8)
-        self.eph_steps_entry.grid(row=3, column=1, sticky='w', padx=(6, 0))
+        self.eph_steps_entry.grid(row=2, column=1, sticky='w', padx=(6, 0))
         self.eph_steps_entry.insert(0, "10")
         Tooltip(self.eph_steps_entry, "Number of ephemeris data points to calculate")
 
         # Buttons
         btn_frame = ttk.Frame(form_frame, style='Panel.TFrame')
-        btn_frame.grid(row=4, column=0, columnspan=2, pady=(12, 4), sticky='w')
+        btn_frame.grid(row=3, column=0, columnspan=2, pady=(12, 4), sticky='w')
 
         self.submit_button = ttk.Button(btn_frame, text="▶  Submit", command=self.submit)
         self.submit_button.pack(side='left', padx=(0, 8))
@@ -642,17 +1369,64 @@ class FindOrbApp:
         res_hdr.pack(fill='x', padx=14, pady=(2, 2))
         ttk.Label(res_hdr, text="Results", style='PanelTitle.TLabel').pack(side='left')
 
-        # Results text area
+        # Results notebook: clean UI instead of dumping the calculation engine text.
         mono = ('Cascadia Code', 9) if self._font_exists('Cascadia Code') \
             else ('Courier New', 9)
-        self.text_area = scrolledtext.ScrolledText(
-            self.right_frame, wrap=tk.WORD, font=mono,
-            background=C['bg'], foreground=C['fg'],
-            insertbackground=C['fg'], selectbackground=C['row_sel'],
-            borderwidth=0, relief='flat'
+
+        self.results_notebook = ttk.Notebook(self.right_frame, style='TNotebook')
+        self.results_notebook.pack(expand=True, fill='both', padx=10, pady=(4, 6))
+
+        self.summary_tab = ttk.Frame(self.results_notebook, style='Panel.TFrame')
+        self.eph_tab = ttk.Frame(self.results_notebook, style='Panel.TFrame')
+        self.elements_tab = ttk.Frame(self.results_notebook, style='Panel.TFrame')
+        self.obs_tab = ttk.Frame(self.results_notebook, style='Panel.TFrame')
+        self.advanced_tab = ttk.Frame(self.results_notebook, style='Panel.TFrame')
+
+        self.results_notebook.add(self.summary_tab, text='Summary')
+        self.results_notebook.add(self.eph_tab, text='Ephemerides')
+        self.results_notebook.add(self.elements_tab, text='Orbital Elements')
+        self.results_notebook.add(self.obs_tab, text='Observations')
+        self.results_notebook.add(self.advanced_tab, text='Advanced')
+
+        self.summary_text = scrolledtext.ScrolledText(
+            self.summary_tab, wrap=tk.WORD, font=('Segoe UI', 10),
+            background=C['bg'], foreground=C['fg'], insertbackground=C['fg'],
+            selectbackground=C['row_sel'], borderwidth=0, relief='flat'
         )
-        self.text_area.configure(state='disabled')
-        self.text_area.pack(expand=True, fill='both', padx=10, pady=(0, 6))
+        self.summary_text.pack(expand=True, fill='both')
+        self.summary_text.configure(state='disabled')
+
+        eph_tree_frame = ttk.Frame(self.eph_tab, style='Panel.TFrame')
+        eph_tree_frame.pack(expand=True, fill='both')
+        self.ephem_tree = ttk.Treeview(eph_tree_frame)
+        self.ephem_tree.pack(side='left', expand=True, fill='both')
+        self.ephem_scroll = ttk.Scrollbar(eph_tree_frame, orient='vertical', command=self.ephem_tree.yview)
+        self.ephem_scroll.pack(side='right', fill='y')
+        self.ephem_tree.configure(yscrollcommand=self.ephem_scroll.set)
+
+        self.elements_text = scrolledtext.ScrolledText(
+            self.elements_tab, wrap=tk.WORD, font=mono,
+            background=C['bg'], foreground=C['fg'], insertbackground=C['fg'],
+            selectbackground=C['row_sel'], borderwidth=0, relief='flat'
+        )
+        self.elements_text.pack(expand=True, fill='both')
+        self.elements_text.configure(state='disabled')
+
+        self.obs_text = scrolledtext.ScrolledText(
+            self.obs_tab, wrap=tk.WORD, font=mono,
+            background=C['bg'], foreground=C['fg'], insertbackground=C['fg'],
+            selectbackground=C['row_sel'], borderwidth=0, relief='flat'
+        )
+        self.obs_text.pack(expand=True, fill='both')
+        self.obs_text.configure(state='disabled')
+
+        self.advanced_text = scrolledtext.ScrolledText(
+            self.advanced_tab, wrap=tk.WORD, font=mono,
+            background=C['bg'], foreground=C['fg'], insertbackground=C['fg'],
+            selectbackground=C['row_sel'], borderwidth=0, relief='flat'
+        )
+        self.advanced_text.pack(expand=True, fill='both')
+        self.advanced_text.configure(state='disabled')
 
     @staticmethod
     def _font_exists(name):
@@ -707,12 +1481,6 @@ class FindOrbApp:
     # Validation
     # ------------------------------------------------------------------
 
-    def validate_find_orb_path(self):
-        executable = os.path.join(self.find_orb_path, 'fo64.exe')
-        if not os.path.exists(executable):
-            messagebox.showerror("Error", f"fo64.exe not found at: {executable}")
-            sys.exit(1)
-
     def clear_placeholder(self, event, entry, placeholder):
         if entry.get() == placeholder:
             entry.delete(0, tk.END)
@@ -732,10 +1500,10 @@ class FindOrbApp:
         if obj_name == '' or obj_name == self.target_object_placeholder:
             self.target_object_entry.configure(style='Error.TEntry')
             valid = False
-        elif not re.match(r'^[A-Za-z0-9\s\-]+$', obj_name):
+        elif not re.match(r'^[A-Za-z0-9\s\-/()._]+$', obj_name):
             self.target_object_entry.configure(style='Error.TEntry')
             messagebox.showerror("Error",
-                                 "Invalid object name. Enter a valid designation.")
+                                 "Invalid object name. Enter a valid designation.\nAllowed: letters, numbers, spaces, hyphen, slash, parentheses, dot and underscore.")
             valid = False
         else:
             self.target_object_entry.configure(style='TEntry')
@@ -783,7 +1551,6 @@ class FindOrbApp:
         thread.start()
 
     def process_submission(self):
-        object_type_value = self.object_type.get()
         target_object = self.target_object_entry.get().strip()
         obs_code = self.obs_code_entry.get().strip()
 
@@ -791,91 +1558,31 @@ class FindOrbApp:
         self.root.after(0, lambda: self.progress.pack(pady=4))
         self.root.after(0, self.progress.start)
         self.root.after(0, lambda: self.status_bar.config(
-            text="Fetching observations…"))
+            text="Querying Project Pluto online Find_Orb…"))
 
         try:
-            # eph_steps was already validated as a positive integer in
-            # validate_entries(). int() here is just a conversion — it lives
-            # INSIDE the try/finally, so any unexpected failure still releases
-            # _processing and re-enables the button.
+            # One remote workflow for both known NEOs and NEOCP tracklets.
+            # No local executable, no OBS80 temporary files, no path configuration.
             eph_steps_int = int(self.eph_steps_entry.get())
 
-            obs80_string = get_observations(object_type_value, target_object)
-
-            # --- Observation contamination filter ---
-            # Applies ONLY to the get-obs-neocp endpoint: it occasionally
-            # mixes lines from other objects into the payload (e.g. querying
-            # C45YPL1 returned 2 lines for TF26C14). On that endpoint the
-            # trksub appears as raw text in the designation columns, so a
-            # literal comparison works.
-            #
-            # For NEO we do NOT filter: get-obs already returns only the
-            # requested object, and OBS80 columns 1-12 hold the PACKED
-            # designation, which never equals the human-readable form
-            # (e.g. "2024 MK" -> "K24M00K"). Filtering by literal equality
-            # here removed ALL of a NEO's observations, producing an empty
-            # file and making fo64.exe return exit status 1.
-            all_lines = obs80_string.splitlines()
-
-            if object_type_value == "NEOCP":
-                filtered_lines = [ln for ln in all_lines
-                                  if ln[:12].strip() == target_object]
-                non_blank = [ln for ln in all_lines if ln.strip()]
-                removed = len(non_blank) - len(filtered_lines)
-                if removed > 0:
-                    foreign_ids = {ln[:12].strip() for ln in non_blank
-                                   if ln[:12].strip() != target_object}
-                    logger.warning(
-                        f"NEOCP {target_object}: removed {removed} line(s) "
-                        f"belonging to other objects: {foreign_ids}")
-                obs80_string = '\n'.join(filtered_lines)
-            else:
-                obs80_string = '\n'.join(ln for ln in all_lines if ln.strip())
-
-            if not obs80_string.strip():
-                # No valid observations -> clear message instead of the cryptic
-                # "find_orb exit 1". The substring below routes to the friendly
-                # handler in the except block.
-                raise KeyError("Error processing response data. "
-                               "No valid observations returned.")
-
-            logger.debug(f"OBS80 content for {target_object}:\n{obs80_string}")
-
-            # Remove any leftover observation files before writing new one
-            # Find_Orb processes ALL .txt files in its directory if multiple exist
-            import glob
-            for old_obs in glob.glob(os.path.join(self.find_orb_path, 'obs_*.txt')):
-                try:
-                    os.remove(old_obs)
-                except Exception:
-                    pass
-
-            obs_file_path = os.path.join(self.find_orb_path,
-                                         f"obs_{target_object}.txt")
-            with open(obs_file_path, 'w') as obs_file:
-                obs_file.write(obs80_string)
+            pp_html = fetch_project_pluto_ephemeris(
+                target_object=target_object,
+                obs_code=obs_code,
+                eph_steps=eph_steps_int,
+                step_size="1h",
+            )
 
             self.root.after(0, lambda: self.status_bar.config(
-                text="Running find_orb…"))
+                text="Processing Project Pluto results…"))
 
-            elements_content, eph_content = run_find_orb(
-                obs_file_path, obs_code, self.find_orb_path, eph_steps_int)
-
-            self.root.after(0, lambda: self.status_bar.config(
-                text="Processing results…"))
-
-            with open(obs_file_path, 'r') as f:
-                obs_content = f.read()
+            elements_content, eph_content, obs_content, advanced_content = split_project_pluto_output(
+                pp_html,
+                obs_code=obs_code,
+            )
 
             self.root.after(0, self.show_text, elements_content,
-                            eph_content, obs_content, target_object)
-            self.root.after(0, lambda: self.save_obs_code(obs_code))
-
-            self.delete_temp_files([
-                obs_file_path,
-                os.path.join(self.find_orb_path, 'efemerides.txt'),
-                os.path.join(self.find_orb_path, 'elements.txt')
-            ])
+                            eph_content, obs_content, target_object,
+                            advanced_content)
 
         except Exception as e:
             logger.error(str(e))
@@ -884,13 +1591,12 @@ class FindOrbApp:
                 self.root.after(0, lambda: messagebox.showerror("Error",
                     "Invalid observatory code.\n"
                     "See: https://minorplanetcenter.net/iau/lists/ObsCodes.html"))
+            elif isinstance(e, ProjectPlutoError) or "Project Pluto" in msg or "ephemeris table" in msg:
+                self.root.after(0, lambda: messagebox.showerror("Project Pluto query failed", msg))
             elif "Error processing response data" in msg:
                 self.root.after(0, lambda: messagebox.showerror("Error",
                     "Object not found. Check the designation and try again."))
                 self.root.after(0, self.refresh)
-            elif "Error executing find_orb" in msg:
-                self.root.after(0, lambda: messagebox.showerror("Error",
-                    "find_orb execution failed. Check installation and config."))
             else:
                 self.root.after(0, lambda: messagebox.showerror("Error",
                     f"Unexpected error: {msg}\nSee app.log for details."))
@@ -901,40 +1607,15 @@ class FindOrbApp:
             self.root.after(0, self.progress.pack_forget)
             self.root.after(0, lambda: self.submit_button.configure(state='normal'))
 
-    def delete_temp_files(self, files):
-        for file in files:
-            try:
-                if os.path.exists(file):
-                    os.remove(file)
-            except Exception as e:
-                logger.error(f"Could not delete file {file}: {e}")
+    def _set_default_obs_code(self):
+        """Pre-fills the observatory code field with the default MPC code.
 
-    # ------------------------------------------------------------------
-    # Observatory code persistence
-    # ------------------------------------------------------------------
-
-    def save_obs_code(self, obs_code):
-        """Saves the observatory code to config.ini after a successful submission."""
-        code_to_save = (obs_code
-                        if obs_code and obs_code != self.obs_code_placeholder
-                        else '500')
-        config = configparser.ConfigParser()
-        config.read('config.ini')
-        if 'Paths' not in config:
-            config['Paths'] = {}
-        config['Paths']['obs_code'] = code_to_save
-        with open('config.ini', 'w') as f:
-            config.write(f)
-        logger.debug(f"Observatory code saved: {code_to_save}")
-
-    def _load_saved_obs_code(self):
-        """Loads saved observatory code from config.ini and pre-fills the field."""
-        config = configparser.ConfigParser()
-        config.read('config.ini')
-        saved_code = config.get('Paths', 'obs_code', fallback='X93')
+        This build does not read or write any settings file; users can
+        change the code directly in the GUI for each session.
+        """
         self.obs_code_entry.configure(foreground=C['entry_fg'])
         self.obs_code_entry.delete(0, tk.END)
-        self.obs_code_entry.insert(0, saved_code)
+        self.obs_code_entry.insert(0, 'X93')
 
     # ------------------------------------------------------------------
     # Reset
@@ -948,55 +1629,136 @@ class FindOrbApp:
 
             self.obs_code_entry.configure(style='TEntry')
             self.obs_code_entry.delete(0, tk.END)
-            self._load_saved_obs_code()
+            self._set_default_obs_code()
 
             self.eph_steps_entry.configure(style='TEntry')
             self.eph_steps_entry.delete(0, tk.END)
             self.eph_steps_entry.insert(0, "10")
 
-            self.text_area.configure(state='normal')
-            self.text_area.delete(1.0, tk.END)
-            self.text_area.configure(state='disabled')
+            self._clear_results()
             self.status_bar.config(text="Ready")
 
     # ------------------------------------------------------------------
     # Results
     # ------------------------------------------------------------------
 
-    def show_text(self, elements_content, eph_content, obs_content, target_object):
-        self.text_area.configure(state='normal')
-        self.text_area.delete(1.0, tk.END)
-        mono = ('Cascadia Code', 9) if self._font_exists('Cascadia Code') \
-            else ('Courier New', 9)
-        self.text_area.tag_configure('header',
-                                     font=('Segoe UI', 10, 'bold'),
-                                     foreground=C['warning'])
-        self.text_area.tag_configure('content', font=mono, foreground=C['fg'])
-        self.text_area.tag_configure('summary',
-                                     font=('Segoe UI', 10),
-                                     foreground=C['success'])
-        self.text_area.tag_configure('summary_warning',
-                                     font=('Segoe UI', 10, 'bold'),
-                                     foreground='#f44747')  # bright red
+    def _write_text_widget(self, widget, text, tags=True):
+        widget.configure(state='normal')
+        widget.delete(1.0, tk.END)
+        if tags:
+            widget.tag_configure('header', font=('Segoe UI', 10, 'bold'), foreground=C['warning'])
+            widget.tag_configure('content', foreground=C['fg'])
+            widget.tag_configure('summary', font=('Segoe UI', 10), foreground=C['success'])
+            widget.tag_configure('summary_warning', font=('Segoe UI', 10, 'bold'), foreground='#f44747')
+        widget.insert(tk.INSERT, text)
+        widget.configure(state='disabled')
 
-        # Summary block
-        self.text_area.insert(tk.INSERT, "── Summary ──\n", 'header')
+    def _clear_results(self):
+        for widget in ('summary_text', 'elements_text', 'obs_text', 'advanced_text'):
+            if hasattr(self, widget):
+                w = getattr(self, widget)
+                w.configure(state='normal')
+                w.delete(1.0, tk.END)
+                w.configure(state='disabled')
+        if hasattr(self, 'ephem_tree'):
+            for row in self.ephem_tree.get_children():
+                self.ephem_tree.delete(row)
+
+    def _populate_ephemeris_tree(self, eph_content):
+        rows = parse_ephemeris_table_for_ui(eph_content)
+        for row in self.ephem_tree.get_children():
+            self.ephem_tree.delete(row)
+
+        columns = ('UTC', 'RA', 'Dec', 'Mag', 'Rate \"/min', 'Mot PA', 'Elong', 'Unc. °', 'Alt', 'Az', 'Air')
+        self.ephem_tree['columns'] = columns
+        self.ephem_tree['show'] = 'headings'
+        widths = {
+            'UTC': 130, 'RA': 115, 'Dec': 115, 'Mag': 55,
+            'Rate \"/min': 80, 'Mot PA': 65,
+            'Elong': 65, 'Unc. °': 70,
+            'Alt': 55, 'Az': 55, 'Air': 55,
+        }
+        for col in columns:
+            self.ephem_tree.heading(col, text=col)
+            self.ephem_tree.column(col, anchor='center', width=widths.get(col, 70), minwidth=40)
+
+        def fmt(value, decimals=0):
+            """Format numeric values compactly for the UI table, preserving N/A/blank."""
+            if value in (None, '', 'N/A'):
+                return 'N/A' if value == 'N/A' else ''
+            try:
+                return f"{float(value):.{decimals}f}"
+            except (TypeError, ValueError):
+                return str(value)
+
+        for i, row in enumerate(rows):
+            tag = 'even' if i % 2 == 0 else 'odd'
+            self.ephem_tree.insert('', 'end', tags=(tag,), values=(
+                row.get('utc', ''), row.get('ra', ''), row.get('dec', ''),
+                row.get('mag', ''),
+                fmt(row.get('rate', ''), 0),
+                fmt(row.get('motion_pa', ''), 0),
+                fmt(row.get('elong', ''), 0),
+                row.get('unc', ''),
+                row.get('alt', ''),
+                fmt(row.get('az', ''), 0),
+                fmt(row.get('air', ''), 1),
+            ))
+        self.ephem_tree.tag_configure('even', background=C['row_even'])
+        self.ephem_tree.tag_configure('odd', background=C['row_odd'])
+
+        if not rows:
+            self.ephem_tree.insert('', 'end', values=('No ephemeris rows parsed', '', '', '', '', '', '', '', '', '', ''))
+
+    def show_text(self, elements_content, eph_content, obs_content, target_object, advanced_content=""):
+        self._clear_results()
+
+        # Summary tab
+        self.summary_text.configure(state='normal')
+        self.summary_text.delete(1.0, tk.END)
+        self.summary_text.tag_configure('header', font=('Segoe UI', 10, 'bold'), foreground=C['warning'])
+        self.summary_text.tag_configure('summary', font=('Segoe UI', 10), foreground=C['success'])
+        self.summary_text.tag_configure('summary_warning', font=('Segoe UI', 10, 'bold'), foreground='#f44747')
+        self.summary_text.insert(tk.INSERT, "── Summary ──\n", 'header')
         try:
-            summary_blocks = parse_summary(elements_content, eph_content, target_object)
+            object_category = infer_object_category(
+                target_object,
+                obs_content=obs_content,
+                advanced_content=advanced_content,
+                neocp_designations=self.neocp_designations,
+            )
+            summary_blocks = parse_summary(
+                elements_content + "\n" + advanced_content,
+                eph_content,
+                target_object,
+                object_category=object_category,
+            )
             for text, tag in summary_blocks:
-                self.text_area.insert(tk.INSERT, text, tag)
+                self.summary_text.insert(tk.INSERT, text, tag)
         except Exception as e:
             logger.warning(f"Could not generate summary: {e}")
-            self.text_area.insert(tk.INSERT, "(Summary unavailable)\n", 'summary')
+            self.summary_text.insert(tk.INSERT, "(Summary unavailable)\n", 'summary')
+        self.summary_text.configure(state='disabled')
 
-        self.text_area.insert(tk.INSERT, "\n", 'content')
-        self.text_area.insert(tk.INSERT, "── Orbital Elements ──\n", 'header')
-        self.text_area.insert(tk.INSERT, elements_content + "\n", 'content')
-        self.text_area.insert(tk.INSERT, "── Ephemerides ──\n", 'header')
-        self.text_area.insert(tk.INSERT, eph_content + "\n", 'content')
-        self.text_area.insert(tk.INSERT, "── Observations ──\n", 'header')
-        self.text_area.insert(tk.INSERT, obs_content, 'content')
-        self.text_area.configure(state='disabled')
+        # Ephemerides tab
+        self._populate_ephemeris_tree(eph_content)
+
+        # Orbital Elements tab: compact first, raw below for traceability.
+        elements_display = (
+            "── Compact Orbital Elements ──\n"
+            + extract_compact_orbital_elements(elements_content)
+            + "\n── Raw Orbital Elements / Residuals ──\n"
+            + elements_content
+        )
+        self._write_text_widget(self.elements_text, elements_display, tags=False)
+        self._write_text_widget(self.obs_text, obs_content, tags=False)
+
+        advanced_display = advanced_content.strip()
+        if not advanced_display:
+            advanced_display = "No advanced metadata available for this run."
+        self._write_text_widget(self.advanced_text, advanced_display, tags=False)
+
+        self.results_notebook.select(self.summary_tab)
         self.status_bar.config(text="Done.")
 
     # ------------------------------------------------------------------
@@ -1051,6 +1813,9 @@ class FindOrbApp:
             if 'V' in df.columns:
                 df['V'] = pd.to_numeric(df['V'], errors='coerce')
                 df.sort_values('V', ascending=True, inplace=True, na_position='last')
+
+            if 'Temp_Desig' in df.columns:
+                self.neocp_designations = set(df['Temp_Desig'].astype(str).str.upper())
 
             # Preferred column order
             preferred = ['Temp_Desig', 'V', 'Score', 'NObs', 'Arc',
@@ -1124,7 +1889,6 @@ class FindOrbApp:
                                            style='TEntry')
         self.target_object_entry.delete(0, tk.END)
         self.target_object_entry.insert(0, designation)
-        self.object_type.set("NEOCP")
         self.status_bar.config(
             text=f"Selected: {designation}  —  press Submit to calculate ephemerides.")
 
@@ -1150,7 +1914,7 @@ class FindOrbApp:
             if not site_code or site_code == self.obs_code_placeholder:
                 site_code = 'X93'
             response = requests.get(
-                f'https://neofixerapi.arizona.edu/targets/?site={site_code}&num=40')
+                f'https://neofixerapi.arizona.edu/targets/?site={site_code}&num=40', timeout=20)
             response.raise_for_status()
             data = response.json()
         except requests.exceptions.RequestException as e:
@@ -1215,7 +1979,7 @@ class FindOrbApp:
         messagebox.showinfo("About",
                             "NEO Tracker  |  Ephemeris Calculator\n"
                             "Developed by Andre\n\n"
-                            "Data: Minor Planet Center · Find_Orb (Project Pluto)")
+                            "Data: Minor Planet Center · Project Pluto online Find_Orb")
 
     def show_help(self):
         help_text = (
@@ -1225,17 +1989,21 @@ class FindOrbApp:
             "Quick start:\n"
             "1. The NEOCP panel on the left loads candidates automatically.\n"
             "   Double-click any row to fill the form.\n"
-            "2. Select the object type (NEO or NEOCP).\n"
-            "3. Enter the object designation, observatory code, and ephemeris steps.\n"
-            "4. Click Submit (or Ctrl+S).\n\n"
+            "2. Enter the object designation, observatory code, and ephemeris steps.\n"
+            "3. Click Submit (or Ctrl+S).\n\n"
             "Observatory code:\n"
             "  3-character alphanumeric MPC code.\n"
             "  List: https://minorplanetcenter.net/iau/lists/ObsCodes.html\n"
-            "  Default: X93. Falls back to 500 (geocentric) if empty.\n\n"
-            "Configuration (config.ini):\n"
-            "  [Paths]\n"
-            "  find_orb_path = C:\\Path\\To\\find_c64\n"
-            "  obs_code = X93\n\n"
+            "  Default in the GUI: X93. Change it directly before submitting.\n\n"
+            "Ephemeris columns:\n"
+            "  Rate \"/min = apparent sky motion in arcsec/min.\n"
+            "  Mot PA = apparent motion position angle, east of north.\n"
+            "  Unc. ° = ephemeris uncertainty, converted to degrees.\n"
+            "           Project Pluto may originally report uncertainty as degrees, arcminutes,\n"
+            "           or arcseconds; the table converts all cases to degrees.\n"
+            "  Distances Δ and r are shown in the Summary instead of the table.\n\n"
+            "Configuration:\n"
+            "  This version no longer uses config.ini or a local Find_Orb path.\n\n"
             "Logs: app.log\n"
             "Support: https://github.com/Anduin-source/NEOS_Tracker/issues"
         )
@@ -1261,34 +2029,11 @@ class FindOrbApp:
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description='NEO Tracker — Ephemeris Calculator')
-    parser.add_argument('--find_orb_path', type=str,
-                        help='Path to the find_orb executable directory')
-    args = parser.parse_args()
-
-    config = configparser.ConfigParser()
-    config.read('config.ini')
-    find_orb_path = config.get('Paths', 'find_orb_path', fallback=None)
-
-    if args.find_orb_path:
-        find_orb_path = args.find_orb_path
-
     root = tk.Tk()
     root.withdraw()
 
-    if not find_orb_path or not os.path.exists(find_orb_path):
-        messagebox.showerror("Error",
-                             "find_orb path not specified or not found.\n"
-                             "Set find_orb_path in config.ini or use --find_orb_path.")
-        sys.exit(1)
-
-    executable = os.path.join(find_orb_path, 'fo64.exe')
-    if not os.path.exists(executable):
-        messagebox.showerror("Error", f"fo64.exe not found at: {executable}")
-        sys.exit(1)
-
     root.deiconify()
-    app = FindOrbApp(root, find_orb_path=find_orb_path)
+    app = NEOTrackerApp(root)
     root.mainloop()
 
 
