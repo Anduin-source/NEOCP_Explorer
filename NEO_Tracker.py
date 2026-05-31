@@ -1976,10 +1976,21 @@ class NEOTrackerApp:
     # ------------------------------------------------------------------
 
     def show_about(self):
-        messagebox.showinfo("About",
-                            "NEO Tracker  |  Ephemeris Calculator\n"
-                            "Developed by Andre\n\n"
-                            "Data: Minor Planet Center · Project Pluto online Find_Orb")
+        
+        messagebox.showinfo(
+            
+            "About",
+            "NEO Tracker  |  Ephemeris Calculator\n"
+            "Developed by Andre Brossel\n\n"
+            "Data: Minor Planet Center · Project Pluto online Find_Orb\n"
+            "https://www.projectpluto.com/\n\n"
+            "Topocentric Alt/Az/Airmass calculations:\n"
+            "Astropy\n\n" 
+            "Optional target information:\n"
+            "NEOFIXER\n\n"
+            "NEO Tracker is an independent project and is not affiliated "
+            "with Project Pluto, the Minor Planet Center, JPL, NEOFIXER, "
+            "or Astropy.")
 
     def show_help(self):
         help_text = (

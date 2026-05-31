@@ -130,10 +130,14 @@ If the observatory code is not in the local coordinate table, Alt/Az may be unav
 
 ## Data sources and acknowledgements
 
-- Minor Planet Center — NEOCP candidate list and small-body data.
-- Project Pluto — online Find_Orb ephemeris and orbit service.
-- Astropy — local coordinate transformations.
-- NEOFIXER — optional target-priority information via menu.
+NEO Tracker relies on several excellent public astronomy tools and services:
+
+- **Project Pluto / Find_Orb, by Bill Gray** — online orbit determination and ephemeris service used by NEO Tracker to compute orbital elements, residuals, uncertainties, and ephemerides.
+- **Minor Planet Center (MPC)** — source of the NEOCP candidate list and minor-planet observational data.
+- **Astropy** — used locally for topocentric Alt/Az and airmass calculations.
+- **NEOFIXER** — optional target-priority information for observatory-specific follow-up planning.
+
+NEO Tracker is an independent project and is not affiliated with Project Pluto, the Minor Planet Center, JPL, NEOFIXER, or Astropy.
 
 ## Version 3.0 highlights
 
