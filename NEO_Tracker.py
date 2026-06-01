@@ -1,4 +1,6 @@
 import html
+import os
+import sys
 import requests
 import tkinter as tk
 import tkinter.ttk as ttk
@@ -107,6 +109,18 @@ PROJECT_PLUTO_URL = "https://www.projectpluto.com/cgi-bin/fo/fo_serve.cgi"
 LD_PER_AU = 389.17  # mean lunar distances per astronomical unit
 
 
+def resource_path(relative_path):
+    """Return absolute path to a bundled resource.
+
+    Works both in normal Python execution and in PyInstaller --onefile builds.
+    """
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
+
 def project_pluto_uncertainty_to_degrees(value):
     """Convert Project Pluto/Find_Orb ephemeris uncertainty to degrees.
 
@@ -186,8 +200,8 @@ def fetch_project_pluto_ephemeris(target_object, obs_code="X93", eph_steps=10, s
 
     headers = {
         "User-Agent": (
-            "NEO Tracker / Project Pluto remote "
-            "NEO Tracker/3.0 (https://github.com/Anduin-source/NEOS_Tracker)"
+            "NEO Tracker/3.0 "
+            "(https://github.com/Anduin-source/NEOS_Tracker)"
         )
     }
 
@@ -1126,10 +1140,15 @@ class NEOTrackerApp:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("NEO Tracker  |  Ephemeris Calculator")
+        self.root.title("NEO Tracker v3.0")
         self.root.geometry("1400x800")
         self.root.configure(bg=C['bg'])
         self.root.minsize(900, 600)
+        try:
+            self.root.iconbitmap(resource_path("neo_tracker.ico"))
+        except Exception:
+            # Keep the app usable even if the icon resource is missing.
+            pass
 
         self._processing = False
         self.neocp_designations = set()
@@ -1344,35 +1363,26 @@ class NEOTrackerApp:
         btn_frame = ttk.Frame(form_frame, style='Panel.TFrame')
         btn_frame.grid(row=3, column=0, columnspan=2, pady=(12, 4), sticky='w')
 
-        self.submit_button = ttk.Button(btn_frame, text="▶  Submit", command=self.submit)
+        self.submit_button = ttk.Button(btn_frame, text="▶  Calculate", command=self.submit)
         self.submit_button.pack(side='left', padx=(0, 8))
         self.root.bind('<Control-s>', lambda e: self.submit(), add='')
         Tooltip(self.submit_button, "Calculate ephemerides  (Ctrl+S)")
 
-        reset_btn = ttk.Button(btn_frame, text="⟳  Reset",
+        reset_btn = ttk.Button(btn_frame, text="⟳  Clear",
                                style='Secondary.TButton', command=self.refresh)
         reset_btn.pack(side='left')
         self.root.bind('<Control-n>', lambda e: self.refresh(), add='')
-        Tooltip(reset_btn, "Clear all fields  (Ctrl+N)")
+        Tooltip(reset_btn, "Clear fields and results  (Ctrl+N)")
 
         # Progress bar
         self.progress = ttk.Progressbar(self.right_frame, mode='indeterminate')
 
-        # Separator
-        ttk.Separator(self.right_frame, orient='horizontal').pack(fill='x',
-                                                                   padx=10, pady=4)
-
-        # Results header
-        res_hdr = ttk.Frame(self.right_frame, style='Panel.TFrame')
-        res_hdr.pack(fill='x', padx=14, pady=(2, 2))
-        ttk.Label(res_hdr, text="Results", style='PanelTitle.TLabel').pack(side='left')
-
-        # Results notebook: clean UI instead of dumping the calculation engine text.
+        # Results notebook: tabs act as the section header, keeping the UI cleaner.
         mono = ('Cascadia Code', 9) if self._font_exists('Cascadia Code') \
             else ('Courier New', 9)
 
         self.results_notebook = ttk.Notebook(self.right_frame, style='TNotebook')
-        self.results_notebook.pack(expand=True, fill='both', padx=10, pady=(4, 6))
+        self.results_notebook.pack(expand=True, fill='both', padx=10, pady=(10, 6))
 
         self.summary_tab = ttk.Frame(self.results_notebook, style='Panel.TFrame')
         self.eph_tab = ttk.Frame(self.results_notebook, style='Panel.TFrame')
@@ -1382,9 +1392,9 @@ class NEOTrackerApp:
 
         self.results_notebook.add(self.summary_tab, text='Summary')
         self.results_notebook.add(self.eph_tab, text='Ephemerides')
-        self.results_notebook.add(self.elements_tab, text='Orbital Elements')
+        self.results_notebook.add(self.elements_tab, text='Orbit')
         self.results_notebook.add(self.obs_tab, text='Observations')
-        self.results_notebook.add(self.advanced_tab, text='Advanced')
+        self.results_notebook.add(self.advanced_tab, text='Details')
 
         self.summary_text = scrolledtext.ScrolledText(
             self.summary_tab, wrap=tk.WORD, font=('Segoe UI', 10),
@@ -1443,11 +1453,12 @@ class NEOTrackerApp:
                           borderwidth=0)
         self.root.config(menu=menubar)
 
-        neofixer_menu = tk.Menu(menubar, tearoff=0, background=C['panel'],
-                                foreground=C['fg'], activebackground=C['accent'],
-                                activeforeground='#ffffff')
-        menubar.add_cascade(label="NEOFIXER", menu=neofixer_menu)
-        neofixer_menu.add_command(label="Run NEOFIXER", command=self.run_neofixer)
+        tools_menu = tk.Menu(menubar, tearoff=0, background=C['panel'],
+                             foreground=C['fg'], activebackground=C['accent'],
+                             activeforeground='#ffffff')
+        menubar.add_cascade(label="Tools", menu=tools_menu)
+        tools_menu.add_command(label="NEOFIXER Targets", command=self.run_neofixer)
+        tools_menu.add_command(label="Refresh NEOCP List", command=self._start_neocp_load)
 
         help_menu = tk.Menu(menubar, tearoff=0, background=C['panel'],
                             foreground=C['fg'], activebackground=C['accent'],
@@ -1456,12 +1467,8 @@ class NEOTrackerApp:
         help_menu.add_command(label="User Manual", command=self.show_help)
         help_menu.add_separator()
         help_menu.add_command(label="About", command=self.show_about)
-
-        quit_menu = tk.Menu(menubar, tearoff=0, background=C['panel'],
-                            foreground=C['fg'], activebackground=C['accent'],
-                            activeforeground='#ffffff')
-        menubar.add_cascade(label="Quit", menu=quit_menu)
-        quit_menu.add_command(label="Quit", command=self.quit_application)
+        help_menu.add_separator()
+        help_menu.add_command(label="Exit", command=self.quit_application)
 
     # ------------------------------------------------------------------
     # Status bar
@@ -1469,8 +1476,8 @@ class NEOTrackerApp:
 
     def create_status_bar(self):
         self.status_bar = tk.Label(self.root, text="Ready",
-                                   background=C['status_bg'],
-                                   foreground=C['status_fg'],
+                                   background=C['panel_alt'],
+                                   foreground=C['fg_dim'],
                                    anchor='w', padx=10,
                                    font=('Segoe UI', 9))
         self.status_bar.pack(side='bottom', fill='x')
@@ -1879,7 +1886,7 @@ class NEOTrackerApp:
         self.target_object_entry.delete(0, tk.END)
         self.target_object_entry.insert(0, designation)
         self.status_bar.config(
-            text=f"Selected: {designation}  —  press Submit to calculate ephemerides.")
+            text=f"Selected: {designation}  —  press Calculate to get ephemerides.")
 
     def _sort_neocp(self, tree, col, descending):
         data = [(tree.set(child, col), child) for child in tree.get_children('')]
@@ -1969,21 +1976,23 @@ class NEOTrackerApp:
     # ------------------------------------------------------------------
 
     def show_about(self):
-        
         messagebox.showinfo(
-            
             "About",
-            "NEO Tracker  |  Ephemeris Calculator\n"
+            "NEO Tracker v3.0\n"
             "Developed by Andre Brossel\n\n"
-            "Data: Minor Planet Center · Project Pluto online Find_Orb\n"
-            "https://www.projectpluto.com/\n\n"
+            "Ephemerides and orbital solutions:\n"
+            "  Project Pluto / Find_Orb by Bill Gray\n"
+            "  https://www.projectpluto.com/\n\n"
+            "NEOCP candidate data:\n"
+            "  Minor Planet Center\n\n"
             "Topocentric Alt/Az/Airmass calculations:\n"
-            "Astropy\n\n" 
+            "  Astropy\n\n"
             "Optional target information:\n"
-            "NEOFIXER\n\n"
+            "  NEOFIXER\n\n"
             "NEO Tracker is an independent project and is not affiliated "
             "with Project Pluto, the Minor Planet Center, JPL, NEOFIXER, "
-            "or Astropy.")
+            "or Astropy."
+        )
 
     def show_help(self):
         help_text = (
@@ -1994,7 +2003,7 @@ class NEOTrackerApp:
             "1. The NEOCP panel on the left loads candidates automatically.\n"
             "   Double-click any row to fill the form.\n"
             "2. Enter the object designation, observatory code, and ephemeris steps.\n"
-            "3. Click Submit (or Ctrl+S).\n\n"
+            "3. Click Calculate (or Ctrl+S).\n\n"
             "Observatory code:\n"
             "  3-character alphanumeric MPC code.\n"
             "  List: https://minorplanetcenter.net/iau/lists/ObsCodes.html\n"
