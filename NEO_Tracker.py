@@ -1,3 +1,4 @@
+import html
 import requests
 import tkinter as tk
 import tkinter.ttk as ttk
@@ -24,18 +25,18 @@ except Exception:
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-file_handler = logging.FileHandler('app.log')
-file_handler.setLevel(logging.DEBUG)
-
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-file_handler.setFormatter(formatter)
-console_handler.setFormatter(formatter)
-
 # Avoid duplicate log entries if this module is reloaded in an IDE/session.
 if not logger.handlers:
+    file_handler = logging.FileHandler('app.log')
+    file_handler.setLevel(logging.DEBUG)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
 
@@ -79,9 +80,8 @@ class Tooltip:
     def show_tooltip(self, event=None):
         if self.tooltip_window or not self.text:
             return
-        x, y, _, cy = self.widget.bbox("insert")
-        x += self.widget.winfo_rootx() + 25
-        y += cy + self.widget.winfo_rooty() + 20
+        x = self.widget.winfo_rootx() + (event.x if event else 10)
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
         self.tooltip_window = tw = tk.Toplevel(self.widget)
         tw.wm_overrideredirect(True)
         tw.wm_geometry(f"+{x}+{y}")
@@ -231,8 +231,6 @@ OBSERVATORY_COORDS = {
 
 def _html_to_readable_text(html_text):
     """Converts Project Pluto's simple HTML pseudo-MPEC into readable visible text."""
-    import html as html_module
-
     # Remove hidden comments from visible text. They are kept separately as
     # advanced metadata, not mixed into the main orbital-elements display.
     text = re.sub(r"<!--.*?-->", "", html_text, flags=re.S)
@@ -241,7 +239,7 @@ def _html_to_readable_text(html_text):
     text = re.sub(r"(?i)</pre\s*>", "\n", text)
     text = re.sub(r"(?i)<li\s*>", "\n- ", text)
     text = re.sub(r"<[^>]+>", "", text)
-    text = html_module.unescape(text)
+    text = html.unescape(text)
     text = "\n".join(line.rstrip() for line in text.splitlines())
     return text
 
@@ -432,7 +430,6 @@ def _compute_altaz_for_rows(rows, obs_code):
             # sec(z) approximation is acceptable for display; avoid values
             # below/near the horizon.
             if row["alt"] > 5:
-                import math
                 z_rad = math.radians(90.0 - row["alt"])
                 row["airmass"] = 1.0 / math.cos(z_rad)
         except Exception as e:
@@ -694,7 +691,7 @@ def infer_object_category(target_object, obs_content="", advanced_content="", ne
         return "NEOCP candidate (current MPC NEOCP list)"
 
     combined = f"{obs_content}\n{advanced_content}"
-    if "VNEOCP" in combined or "NEOCP" in combined:
+    if "NEOCP" in combined:
         return "NEOCP candidate"
 
     return "Known object / MPC designation"
@@ -1292,6 +1289,7 @@ class NEOTrackerApp:
                                      command=self.neocp_tree.yview)
         neocp_scroll.pack(side='right', fill='y')
         self.neocp_tree.configure(yscrollcommand=neocp_scroll.set)
+        self.neocp_tree.bind("<Double-1>", self._select_neocp_from_panel)
 
     def _build_right_panel(self):
         # Form
@@ -1642,14 +1640,9 @@ class NEOTrackerApp:
     # Results
     # ------------------------------------------------------------------
 
-    def _write_text_widget(self, widget, text, tags=True):
+    def _write_text_widget(self, widget, text):
         widget.configure(state='normal')
         widget.delete(1.0, tk.END)
-        if tags:
-            widget.tag_configure('header', font=('Segoe UI', 10, 'bold'), foreground=C['warning'])
-            widget.tag_configure('content', foreground=C['fg'])
-            widget.tag_configure('summary', font=('Segoe UI', 10), foreground=C['success'])
-            widget.tag_configure('summary_warning', font=('Segoe UI', 10, 'bold'), foreground='#f44747')
         widget.insert(tk.INSERT, text)
         widget.configure(state='disabled')
 
@@ -1750,13 +1743,13 @@ class NEOTrackerApp:
             + "\n── Raw Orbital Elements / Residuals ──\n"
             + elements_content
         )
-        self._write_text_widget(self.elements_text, elements_display, tags=False)
-        self._write_text_widget(self.obs_text, obs_content, tags=False)
+        self._write_text_widget(self.elements_text, elements_display)
+        self._write_text_widget(self.obs_text, obs_content)
 
         advanced_display = advanced_content.strip()
         if not advanced_display:
             advanced_display = "No advanced metadata available for this run."
-        self._write_text_widget(self.advanced_text, advanced_display, tags=False)
+        self._write_text_widget(self.advanced_text, advanced_display)
 
         self.results_notebook.select(self.summary_tab)
         self.status_bar.config(text="Done.")
@@ -1839,8 +1832,6 @@ class NEOTrackerApp:
                         self.neocp_tree, _c, False))
                 self.neocp_tree.column(col, anchor=anchor, width=w, minwidth=30)
 
-            desig_idx = cols.index('Temp_Desig') if 'Temp_Desig' in cols else 0
-
             for i, (_, row) in enumerate(df.iterrows()):
                 values = [f"{row[c]:.1f}" if isinstance(row[c], float) and c == 'V'
                           else f"{row[c]:.2f}" if isinstance(row[c], float)
@@ -1850,10 +1841,6 @@ class NEOTrackerApp:
 
             self.neocp_tree.tag_configure('even', background=C['row_even'])
             self.neocp_tree.tag_configure('odd', background=C['row_odd'])
-
-            self.neocp_tree.bind(
-                "<Double-1>",
-                lambda e: self._select_neocp_from_panel(e, desig_idx))
 
             count = len(df)
             self.neocp_counter_label.configure(text=f"{count} objects")
@@ -1873,7 +1860,7 @@ class NEOTrackerApp:
         self.neocp_loading_label.configure(text="Failed to load — check connection")
         self.status_bar.config(text="NEOCP load failed.")
 
-    def _select_neocp_from_panel(self, event, desig_idx):
+    def _select_neocp_from_panel(self, event):
         # Identify clicked region — ignore header and empty areas
         region = self.neocp_tree.identify_region(event.x, event.y)
         if region != 'cell':
@@ -1884,6 +1871,8 @@ class NEOTrackerApp:
         values = self.neocp_tree.item(selected, 'values')
         if not values:
             return
+        cols = list(self.neocp_tree['columns'])
+        desig_idx = cols.index('Temp_Desig') if 'Temp_Desig' in cols else 0
         designation = values[desig_idx]
         self.target_object_entry.configure(foreground=C['entry_fg'],
                                            style='TEntry')
@@ -1931,8 +1920,15 @@ class NEOTrackerApp:
         win.geometry("820x440")
         win.configure(bg=C['bg'])
 
-        tree = ttk.Treeview(win)
-        tree.pack(expand=True, fill='both', padx=10, pady=10)
+        tree_frame = ttk.Frame(win)
+        tree_frame.pack(expand=True, fill='both', padx=10, pady=10)
+
+        tree = ttk.Treeview(tree_frame)
+        tree.pack(side='left', expand=True, fill='both')
+
+        scrollbar = ttk.Scrollbar(tree_frame, orient='vertical', command=tree.yview)
+        scrollbar.pack(side='right', fill='y')
+        tree.configure(yscrollcommand=scrollbar.set)
 
         columns = ('ID', 'Priority', 'Score', 'Cost', 'Magnitude', '1σ Uncertainty')
         tree["columns"] = columns
@@ -1957,10 +1953,6 @@ class NEOTrackerApp:
         tree.tag_configure('even', background=C['row_even'])
         tree.tag_configure('odd', background=C['row_odd'])
 
-        scrollbar = ttk.Scrollbar(win, orient='vertical', command=tree.yview)
-        tree.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side='right', fill='y')
-
     def sort_by(self, tree, col, descending):
         data = [(tree.set(child, col), child) for child in tree.get_children('')]
         try:
@@ -1969,6 +1961,7 @@ class NEOTrackerApp:
             data.sort(reverse=descending)
         for ix, item in enumerate(data):
             tree.move(item[1], '', ix)
+            tree.item(item[1], tags=('even' if ix % 2 == 0 else 'odd',))
         tree.heading(col, command=lambda: self.sort_by(tree, col, not descending))
 
     # ------------------------------------------------------------------
@@ -2042,9 +2035,8 @@ class NEOTrackerApp:
 def main():
     root = tk.Tk()
     root.withdraw()
-
+    NEOTrackerApp(root)
     root.deiconify()
-    app = NEOTrackerApp(root)
     root.mainloop()
 
 
