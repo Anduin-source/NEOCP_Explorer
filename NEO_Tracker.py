@@ -13,10 +13,11 @@ from datetime import datetime
 import pandas as pd
 
 try:
-    from cartes_du_ciel import send_coordinates_to_cdc, CartesDuCielError
+    from cartes_du_ciel import send_coordinates_to_cdc, slew_telescope_via_cdc, CartesDuCielError
     CDC_AVAILABLE = True
 except Exception:
     send_coordinates_to_cdc = None
+    slew_telescope_via_cdc = None
     CartesDuCielError = Exception
     CDC_AVAILABLE = False
 
@@ -1457,6 +1458,10 @@ class NEOTrackerApp:
             label="Send to SkyChart / Cartes du Ciel",
             command=self.send_selected_ephemeris_to_cdc
         )
+        self.ephem_context_menu.add_command(
+            label="Slew telescope via SkyChart...",
+            command=self.slew_selected_ephemeris_via_cdc
+        )
         self.ephem_tree.bind("<Button-3>", self._show_ephemeris_context_menu)
 
         self.elements_text = scrolledtext.ScrolledText(
@@ -1507,6 +1512,8 @@ class NEOTrackerApp:
         tools_menu.add_command(label="NEOFIXER Targets", command=self.run_neofixer)
         tools_menu.add_command(label="Send Selected Ephemeris to Cartes du Ciel",
                                command=self.send_selected_ephemeris_to_cdc)
+        tools_menu.add_command(label="Slew Telescope via Cartes du Ciel...",
+                               command=self.slew_selected_ephemeris_via_cdc)
         tools_menu.add_separator()
         tools_menu.add_command(label="Refresh NEOCP List", command=self._start_neocp_load)
 
@@ -2047,6 +2054,113 @@ class NEOTrackerApp:
                     text="Cartes du Ciel send failed."))
                 self.root.after(0, lambda: messagebox.showerror(
                     "Cartes du Ciel send failed",
+                    str(exc)
+                ))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+
+    def _selected_ephemeris_altitude(self, row):
+        """Return selected-row altitude as float, or None when unavailable."""
+        raw_alt = str(row.get('Alt', '')).strip()
+        if not raw_alt or raw_alt.upper() == 'N/A':
+            return None
+        try:
+            return float(raw_alt)
+        except ValueError:
+            return None
+
+    def slew_selected_ephemeris_via_cdc(self):
+        """Slew the CdC-configured telescope to the selected ephemeris row.
+
+        Safety policy:
+        - requires a selected ephemeris row;
+        - requires valid local altitude;
+        - refuses targets below the horizon;
+        - requires user confirmation before sending SLEW.
+        """
+        if not CDC_AVAILABLE or slew_telescope_via_cdc is None:
+            messagebox.showerror(
+                "Cartes du Ciel integration unavailable",
+                "The Cartes du Ciel helper module was not found.\n"
+                "Make sure cartes_du_ciel.py is in the same folder as NEO_Tracker.py."
+            )
+            return
+
+        row = self._selected_ephemeris_row()
+        if not row:
+            messagebox.showinfo(
+                "No ephemeris selected",
+                "Select one row in the Ephemerides tab first."
+            )
+            return
+
+        ra = row.get('RA', '').strip()
+        dec = row.get('Dec', '').strip()
+        utc = row.get('UTC', '').strip()
+        alt = self._selected_ephemeris_altitude(row)
+
+        if not ra or not dec:
+            messagebox.showerror(
+                "Invalid ephemeris row",
+                "The selected row does not contain valid RA/Dec coordinates."
+            )
+            return
+
+        if alt is None:
+            messagebox.showerror(
+                "Slew blocked",
+                "The selected ephemeris row has no valid altitude.\n"
+                "Slew is blocked because altitude cannot be checked."
+            )
+            return
+
+        if alt < 0.0:
+            messagebox.showerror(
+                "Slew blocked",
+                f"The selected target is below the horizon.\n\n"
+                f"UTC: {utc}\n"
+                f"Altitude: {alt:.1f}°\n\n"
+                "Slew was not sent."
+            )
+            return
+
+        target = self.target_object_entry.get().strip()
+        if target == self.target_object_placeholder:
+            target = "selected object"
+
+        ok = messagebox.askyesno(
+            "Confirm telescope slew",
+            "Slew telescope via SkyChart / Cartes du Ciel?\n\n"
+            f"Object: {target}\n"
+            f"UTC: {utc}\n"
+            f"RA: {ra}\n"
+            f"Dec: {dec}\n"
+            f"Altitude: {alt:.1f}°\n\n"
+            "This will send a telescope SLEW command through Cartes du Ciel."
+        )
+        if not ok:
+            return
+
+        self.status_bar.config(text=f"Sending slew command via Cartes du Ciel: {target}  {utc}…")
+
+        def worker():
+            try:
+                replies = slew_telescope_via_cdc(ra, dec)
+                logger.info(
+                    "Slew command sent via Cartes du Ciel: target=%s UTC=%s RA=%s Dec=%s Alt=%.1f replies=%s",
+                    target, utc, ra, dec, alt, replies
+                )
+                self.root.after(0, lambda: self.status_bar.config(
+                    text=f"Slew command sent via Cartes du Ciel: {target}  {utc}  Alt {alt:.1f}°"
+                ))
+            except Exception as exc:
+                logger.error("Cartes du Ciel slew failed: %s", exc)
+                self.root.after(0, lambda: self.status_bar.config(
+                    text="Cartes du Ciel slew failed."
+                ))
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Cartes du Ciel slew failed",
                     str(exc)
                 ))
 
