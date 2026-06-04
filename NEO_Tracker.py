@@ -12,6 +12,14 @@ import math
 from datetime import datetime
 import pandas as pd
 
+try:
+    from cartes_du_ciel import send_coordinates_to_cdc, CartesDuCielError
+    CDC_AVAILABLE = True
+except Exception:
+    send_coordinates_to_cdc = None
+    CartesDuCielError = Exception
+    CDC_AVAILABLE = False
+
 # Optional: used only to compute topocentric Alt/Az from Project Pluto RA/Dec.
 # The application still runs without astropy; Alt/Az will simply be unavailable.
 try:
@@ -1202,6 +1210,14 @@ class NEOTrackerApp:
                     foreground=C['entry_fg'], insertcolor=C['fg'],
                     bordercolor=C['border'], font=('Segoe UI', 10))
 
+        s.configure('TCombobox', fieldbackground=C['entry_bg'],
+                    background=C['entry_bg'], foreground=C['entry_fg'],
+                    arrowcolor=C['fg_dim'], bordercolor=C['border'],
+                    font=('Segoe UI', 10))
+        s.map('TCombobox',
+              fieldbackground=[('readonly', C['entry_bg']), ('focus', '#4a4a4a')],
+              foreground=[('readonly', C['entry_fg'])])
+
         s.configure('TButton', background=C['accent'], foreground='#ffffff',
                     bordercolor=C['accent'], font=('Segoe UI', 10),
                     padding=(10, 5))
@@ -1359,9 +1375,28 @@ class NEOTrackerApp:
         self.eph_steps_entry.insert(0, "10")
         Tooltip(self.eph_steps_entry, "Number of ephemeris data points to calculate")
 
+        # Ephemeris step size
+        ttk.Label(form_frame, text="Step size:",
+                  style='Header.TLabel').grid(row=3, column=0, sticky='w', pady=5)
+        self.step_size_var = tk.StringVar(value="10m")
+        self.step_size_combo = ttk.Combobox(
+            form_frame,
+            textvariable=self.step_size_var,
+            values=("10m", "30m", "1h", "1d"),
+            state="readonly",
+            width=8,
+            font=('Segoe UI', 10),
+        )
+        self.step_size_combo.grid(row=3, column=1, sticky='w', padx=(6, 0))
+        Tooltip(
+            self.step_size_combo,
+            "Ephemeris interval. Use 10m for fast NEOCP objects, "
+            "30m for moderate objects, 1h for slow objects, and 1d for multi-day planning."
+        )
+
         # Buttons
         btn_frame = ttk.Frame(form_frame, style='Panel.TFrame')
-        btn_frame.grid(row=3, column=0, columnspan=2, pady=(12, 4), sticky='w')
+        btn_frame.grid(row=4, column=0, columnspan=2, pady=(12, 4), sticky='w')
 
         self.submit_button = ttk.Button(btn_frame, text="▶  Calculate", command=self.submit)
         self.submit_button.pack(side='left', padx=(0, 8))
@@ -1412,6 +1447,18 @@ class NEOTrackerApp:
         self.ephem_scroll.pack(side='right', fill='y')
         self.ephem_tree.configure(yscrollcommand=self.ephem_scroll.set)
 
+        # Right-click context menu for fast CdC/SkyChart hand-off.
+        self.ephem_context_menu = tk.Menu(
+            self.ephem_tree, tearoff=0, background=C['panel'],
+            foreground=C['fg'], activebackground=C['accent'],
+            activeforeground='#ffffff'
+        )
+        self.ephem_context_menu.add_command(
+            label="Send to SkyChart / Cartes du Ciel",
+            command=self.send_selected_ephemeris_to_cdc
+        )
+        self.ephem_tree.bind("<Button-3>", self._show_ephemeris_context_menu)
+
         self.elements_text = scrolledtext.ScrolledText(
             self.elements_tab, wrap=tk.WORD, font=mono,
             background=C['bg'], foreground=C['fg'], insertbackground=C['fg'],
@@ -1458,6 +1505,9 @@ class NEOTrackerApp:
                              activeforeground='#ffffff')
         menubar.add_cascade(label="Tools", menu=tools_menu)
         tools_menu.add_command(label="NEOFIXER Targets", command=self.run_neofixer)
+        tools_menu.add_command(label="Send Selected Ephemeris to Cartes du Ciel",
+                               command=self.send_selected_ephemeris_to_cdc)
+        tools_menu.add_separator()
         tools_menu.add_command(label="Refresh NEOCP List", command=self._start_neocp_load)
 
         help_menu = tk.Menu(menubar, tearoff=0, background=C['panel'],
@@ -1540,6 +1590,11 @@ class NEOTrackerApp:
         else:
             self.eph_steps_entry.configure(style='TEntry')
 
+        # --- Step size ---
+        if hasattr(self, 'step_size_var') and self.step_size_var.get() not in {'10m', '30m', '1h', '1d'}:
+            messagebox.showerror("Error", "Step size must be one of: 10m, 30m, 1h, 1d.")
+            valid = False
+
         return valid
 
     # ------------------------------------------------------------------
@@ -1562,19 +1617,22 @@ class NEOTrackerApp:
         self.root.after(0, lambda: self.submit_button.configure(state='disabled'))
         self.root.after(0, lambda: self.progress.pack(pady=4))
         self.root.after(0, self.progress.start)
+        step_size_for_status = self.step_size_var.get().strip() if hasattr(self, 'step_size_var') else "10m"
         self.root.after(0, lambda: self.status_bar.config(
-            text="Querying Project Pluto online Find_Orb…"))
+            text=f"Querying Project Pluto online Find_Orb… step={step_size_for_status}"))
 
         try:
             # One remote workflow for both known NEOs and NEOCP tracklets.
             # No local executable, no OBS80 temporary files, no path configuration.
             eph_steps_int = int(self.eph_steps_entry.get())
 
+            step_size = self.step_size_var.get().strip() or "10m"
+
             pp_html = fetch_project_pluto_ephemeris(
                 target_object=target_object,
                 obs_code=obs_code,
                 eph_steps=eph_steps_int,
-                step_size="1h",
+                step_size=step_size,
             )
 
             self.root.after(0, lambda: self.status_bar.config(
@@ -1639,6 +1697,8 @@ class NEOTrackerApp:
             self.eph_steps_entry.configure(style='TEntry')
             self.eph_steps_entry.delete(0, tk.END)
             self.eph_steps_entry.insert(0, "10")
+            if hasattr(self, 'step_size_var'):
+                self.step_size_var.set("10m")
 
             self._clear_results()
             self.status_bar.config(text="Ready")
@@ -1901,6 +1961,98 @@ class NEOTrackerApp:
                      command=lambda: self._sort_neocp(tree, col, not descending))
 
     # ------------------------------------------------------------------
+    # Cartes du Ciel / SkyChart integration
+    # ------------------------------------------------------------------
+
+    def _show_ephemeris_context_menu(self, event):
+        """Select the row under the mouse and show the ephemeris popup menu."""
+        row_id = self.ephem_tree.identify_row(event.y)
+        if not row_id:
+            return
+        self.ephem_tree.selection_set(row_id)
+        self.ephem_tree.focus(row_id)
+        try:
+            self.ephem_context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.ephem_context_menu.grab_release()
+
+    def _selected_ephemeris_row(self):
+        """Return the selected ephemeris row as a dict keyed by Treeview columns."""
+        if not hasattr(self, 'ephem_tree'):
+            return None
+
+        selected = self.ephem_tree.selection()
+        item_id = selected[0] if selected else self.ephem_tree.focus()
+        if not item_id:
+            return None
+
+        values = self.ephem_tree.item(item_id, 'values')
+        if not values:
+            return None
+
+        columns = list(self.ephem_tree['columns'])
+        return {col: values[i] if i < len(values) else '' for i, col in enumerate(columns)}
+
+    def send_selected_ephemeris_to_cdc(self):
+        """Send the selected ephemeris RA/Dec to Cartes du Ciel/SkyChart.
+
+        This only centers the CdC chart. It does not slew the telescope.
+        NINA can then capture the coordinates from CdC using its normal
+        Planetarium/Framing workflow.
+        """
+        if not CDC_AVAILABLE or send_coordinates_to_cdc is None:
+            messagebox.showerror(
+                "Cartes du Ciel integration unavailable",
+                "The Cartes du Ciel helper module was not found.\n"
+                "Make sure cartes_du_ciel.py is in the same folder as NEO_Tracker.py."
+            )
+            return
+
+        row = self._selected_ephemeris_row()
+        if not row:
+            messagebox.showinfo(
+                "No ephemeris selected",
+                "Select one row in the Ephemerides tab first."
+            )
+            return
+
+        ra = row.get('RA', '').strip()
+        dec = row.get('Dec', '').strip()
+        utc = row.get('UTC', '').strip()
+        if not ra or not dec:
+            messagebox.showerror(
+                "Invalid ephemeris row",
+                "The selected row does not contain valid RA/Dec coordinates."
+            )
+            return
+
+        target = self.target_object_entry.get().strip()
+        if target == self.target_object_placeholder:
+            target = "selected object"
+
+        # No confirmation/success dialog here: this command is intentionally
+        # lightweight for the normal workflow. The user can see CdC move, and
+        # errors are still reported if the hand-off fails.
+        self.status_bar.config(text=f"Sending {target} coordinates to Cartes du Ciel…")
+
+        def worker():
+            try:
+                replies = send_coordinates_to_cdc(ra, dec)
+                logger.info("Sent coordinates to Cartes du Ciel: target=%s UTC=%s RA=%s Dec=%s replies=%s", target, utc, ra, dec, replies)
+                self.root.after(0, lambda: self.status_bar.config(
+                    text=f"Sent to Cartes du Ciel: {target}  {utc}  RA {ra}  Dec {dec}"))
+            except Exception as exc:
+                logger.error("Cartes du Ciel integration failed: %s", exc)
+                self.root.after(0, lambda: self.status_bar.config(
+                    text="Cartes du Ciel send failed."))
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Cartes du Ciel send failed",
+                    str(exc)
+                ))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ------------------------------------------------------------------
     # NEOFIXER
     # ------------------------------------------------------------------
 
@@ -1991,7 +2143,7 @@ class NEOTrackerApp:
             "  NEOFIXER\n\n"
             "NEO Tracker is an independent project and is not affiliated "
             "with Project Pluto, the Minor Planet Center, JPL, NEOFIXER, "
-            "or Astropy."
+            "Astropy, or Cartes du Ciel."
         )
 
     def show_help(self):
@@ -2002,12 +2154,17 @@ class NEOTrackerApp:
             "Quick start:\n"
             "1. The NEOCP panel on the left loads candidates automatically.\n"
             "   Double-click any row to fill the form.\n"
-            "2. Enter the object designation, observatory code, and ephemeris steps.\n"
+            "2. Enter the object designation, observatory code, ephemeris steps, and step size.\n"
             "3. Click Calculate (or Ctrl+S).\n\n"
             "Observatory code:\n"
             "  3-character alphanumeric MPC code.\n"
             "  List: https://minorplanetcenter.net/iau/lists/ObsCodes.html\n"
             "  Default in the GUI: X93. Change it directly before submitting.\n\n"
+            "Step size:\n"
+            "  10m = use for fast NEOCP objects or precise hand-off to SkyChart/NINA.\n"
+            "  30m = useful for moderate NEOCP objects.\n"
+            "  1h  = useful for slower known objects.\n"
+            "  1d  = useful for multi-day planning.\n\n"
             "Ephemeris columns:\n"
             "  Rate \"/min = apparent sky motion in arcsec/min.\n"
             "  Mot PA = apparent motion position angle, east of north.\n"
