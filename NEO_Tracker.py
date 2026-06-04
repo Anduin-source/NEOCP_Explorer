@@ -4,7 +4,7 @@ import sys
 import requests
 import tkinter as tk
 import tkinter.ttk as ttk
-from tkinter import scrolledtext, messagebox, font
+from tkinter import scrolledtext, messagebox, font, filedialog
 import re
 import logging
 import threading
@@ -1462,6 +1462,15 @@ class NEOTrackerApp:
             label="Slew telescope via SkyChart...",
             command=self.slew_selected_ephemeris_via_cdc
         )
+        self.ephem_context_menu.add_separator()
+        self.ephem_context_menu.add_command(
+            label="Export selected row to CdC Observing List",
+            command=self.export_selected_ephemeris_to_cdc_obslist
+        )
+        self.ephem_context_menu.add_command(
+            label="Export all rows to CdC Observing List",
+            command=self.export_all_ephemerides_to_cdc_obslist
+        )
         self.ephem_tree.bind("<Button-3>", self._show_ephemeris_context_menu)
 
         self.elements_text = scrolledtext.ScrolledText(
@@ -1514,6 +1523,11 @@ class NEOTrackerApp:
                                command=self.send_selected_ephemeris_to_cdc)
         tools_menu.add_command(label="Slew Telescope via Cartes du Ciel...",
                                command=self.slew_selected_ephemeris_via_cdc)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="Export Selected Row to CdC Observing List",
+                               command=self.export_selected_ephemeris_to_cdc_obslist)
+        tools_menu.add_command(label="Export All Ephemeris Rows to CdC Observing List",
+                               command=self.export_all_ephemerides_to_cdc_obslist)
         tools_menu.add_separator()
         tools_menu.add_command(label="Refresh NEOCP List", command=self._start_neocp_load)
 
@@ -2166,6 +2180,152 @@ class NEOTrackerApp:
 
         threading.Thread(target=worker, daemon=True).start()
 
+
+    # ------------------------------------------------------------------
+    # CdC Observing List export
+    # ------------------------------------------------------------------
+
+    def _ephemeris_tree_rows(self):
+        """Return all ephemeris rows currently displayed in the Treeview."""
+        if not hasattr(self, 'ephem_tree'):
+            return []
+        columns = list(self.ephem_tree['columns'])
+        rows = []
+        for item_id in self.ephem_tree.get_children():
+            values = self.ephem_tree.item(item_id, 'values')
+            if not values:
+                continue
+            row = {col: values[i] if i < len(values) else '' for i, col in enumerate(columns)}
+            # Skip placeholder/error rows.
+            if row.get('RA') and row.get('Dec'):
+                rows.append(row)
+        return rows
+
+    def _sanitize_cdc_name(self, text, max_len=32):
+        """Return a compact CdC-safe object/list label."""
+        cleaned = re.sub(r'[^A-Za-z0-9_+\-.]', '_', str(text).strip())
+        cleaned = re.sub(r'_+', '_', cleaned).strip('_')
+        return (cleaned or 'NEO_Target')[:max_len]
+
+    def _cdc_obslist_label_from_utc(self, utc):
+        """Return a compact label for CdC map display.
+
+        CdC tends to display the observing-list object name plus the label on
+        the sky map.  To avoid long labels such as
+        A11D5ma_202606050600 2026-06-05, keep the object name as the target
+        designation and put only the ephemeris time/date in the label.
+        """
+        utc = (utc or '').strip()
+        m = re.match(r'^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}:\d{2})$', utc)
+        if m:
+            _, month, day, hhmm = m.groups()
+            return f"{month}-{day} {hhmm}"
+        return utc[:32]
+
+    def _cdc_obslist_line(self, name, row):
+        """Build one fixed-width Cartes du Ciel Observing List line.
+
+        CdC Observing List format:
+          1-32   object name
+          33-42  RA in decimal degrees, J2000
+          43-52  Dec in decimal degrees, J2000
+          53-84  label/name
+          85+    free description
+        """
+        ra_text = row.get('RA', '').strip()
+        dec_text = row.get('Dec', '').strip()
+        if not ra_text or not dec_text:
+            raise ValueError('Missing RA/Dec in ephemeris row.')
+
+        ra_deg = _ra_to_degrees(ra_text)
+        dec_deg = _dec_to_degrees(dec_text)
+
+        utc = row.get('UTC', '').strip()
+        label = self._cdc_obslist_label_from_utc(utc)[:32]
+        desc = (
+            f"UTC {utc}; "
+            f"RA {ra_text}; Dec {dec_text}; "
+            f"Mag {row.get('Mag', '')}; "
+            f"Rate {row.get('Rate \"/min', '')} arcsec/min; "
+            f"MotPA {row.get('Mot PA', '')}; "
+            f"Unc {row.get('Unc. °', '')} deg; "
+            f"Alt {row.get('Alt', '')}; Az {row.get('Az', '')}; Air {row.get('Air', '')}"
+        )
+
+        return f"{name:<32}{ra_deg:10.5f}{dec_deg:10.5f}{label:<32}{desc}"
+
+    def _write_cdc_obslist_file(self, rows, default_name):
+        """Ask for a file path and write selected/all rows as a CdC Observing List."""
+        if not rows:
+            messagebox.showinfo(
+                "No ephemeris rows",
+                "There are no valid ephemeris rows to export."
+            )
+            return
+
+        target = self.target_object_entry.get().strip()
+        if not target or target == self.target_object_placeholder:
+            target = "NEO_Target"
+
+        safe_target = self._sanitize_cdc_name(target)
+        default_file = self._sanitize_cdc_name(default_name, max_len=80) + ".txt"
+
+        path = filedialog.asksaveasfilename(
+            title="Save Cartes du Ciel Observing List",
+            defaultextension=".txt",
+            initialfile=default_file,
+            filetypes=[
+                ("Cartes du Ciel observing list", "*.txt"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not path:
+            return
+
+        lines = [f"NEO Tracker - {target} ephemeris"]
+        # Keep the CdC object name short.  The UTC of each ephemeris point is
+        # stored in the label and description, so the sky-map label remains
+        # readable while every row is still uniquely documented.
+        obj_name = self._sanitize_cdc_name(safe_target)
+        for row in rows:
+            lines.append(self._cdc_obslist_line(obj_name, row))
+
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write("\n".join(lines) + "\n")
+        except OSError as exc:
+            messagebox.showerror("CdC Observing List export failed", str(exc))
+            self.status_bar.config(text="CdC Observing List export failed.")
+            return
+
+        self.status_bar.config(
+            text=f"Saved CdC Observing List: {len(rows)} row(s) → {path}"
+        )
+
+    def export_selected_ephemeris_to_cdc_obslist(self):
+        """Export only the currently selected ephemeris row as a CdC Observing List."""
+        row = self._selected_ephemeris_row()
+        if not row:
+            messagebox.showinfo(
+                "No ephemeris selected",
+                "Select one row in the Ephemerides tab first."
+            )
+            return
+
+        target = self.target_object_entry.get().strip()
+        if not target or target == self.target_object_placeholder:
+            target = "NEO_Target"
+        utc_token = re.sub(r'[^0-9]', '', row.get('UTC', '')) or 'selected'
+        self._write_cdc_obslist_file([row], f"cdc_obslist_{target}_{utc_token}")
+
+    def export_all_ephemerides_to_cdc_obslist(self):
+        """Export every displayed ephemeris row as a CdC Observing List trail."""
+        rows = self._ephemeris_tree_rows()
+        target = self.target_object_entry.get().strip()
+        if not target or target == self.target_object_placeholder:
+            target = "NEO_Target"
+        self._write_cdc_obslist_file(rows, f"cdc_obslist_{target}_trail")
+
     # ------------------------------------------------------------------
     # NEOFIXER
     # ------------------------------------------------------------------
@@ -2286,6 +2446,11 @@ class NEOTrackerApp:
             "           Project Pluto may originally report uncertainty as degrees, arcminutes,\n"
             "           or arcseconds; the table converts all cases to degrees.\n"
             "  Distances Δ and r are shown in the Summary instead of the table.\n\n"
+            "Cartes du Ciel / SkyChart:\n"
+            "  Right-click an ephemeris row to send its coordinates to CdC.\n"
+            "  You can also export the selected row or the full ephemeris trail\n"
+            "  as a CdC Observing List file, so each ephemeris point appears\n"
+            "  as a temporary labeled object in SkyChart.\n\n"
             "Configuration:\n"
             "  This version no longer uses config.ini or a local Find_Orb path.\n\n"
             "Logs: app.log\n"
