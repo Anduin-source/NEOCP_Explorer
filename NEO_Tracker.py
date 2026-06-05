@@ -13,11 +13,11 @@ from datetime import datetime
 import pandas as pd
 
 try:
-    from cartes_du_ciel import send_coordinates_to_cdc, slew_telescope_via_cdc, CartesDuCielError
+    from cartes_du_ciel import slew_telescope_via_cdc, load_observing_list_in_cdc, CartesDuCielError
     CDC_AVAILABLE = True
 except Exception:
-    send_coordinates_to_cdc = None
     slew_telescope_via_cdc = None
+    load_observing_list_in_cdc = None
     CartesDuCielError = Exception
     CDC_AVAILABLE = False
 
@@ -1379,7 +1379,7 @@ class NEOTrackerApp:
         # Ephemeris step size
         ttk.Label(form_frame, text="Step size:",
                   style='Header.TLabel').grid(row=3, column=0, sticky='w', pady=5)
-        self.step_size_var = tk.StringVar(value="10m")
+        self.step_size_var = tk.StringVar(value="1h")
         self.step_size_combo = ttk.Combobox(
             form_frame,
             textvariable=self.step_size_var,
@@ -1391,8 +1391,8 @@ class NEOTrackerApp:
         self.step_size_combo.grid(row=3, column=1, sticky='w', padx=(6, 0))
         Tooltip(
             self.step_size_combo,
-            "Ephemeris interval. Use 10m for fast NEOCP objects, "
-            "30m for moderate objects, 1h for slow objects, and 1d for multi-day planning."
+            "Ephemeris interval. Default: 1h. Use 10m for fast NEOCP objects, "
+            "30m for moderate objects, and 1d for multi-day planning."
         )
 
         # Buttons
@@ -1455,20 +1455,12 @@ class NEOTrackerApp:
             activeforeground='#ffffff'
         )
         self.ephem_context_menu.add_command(
-            label="Send to SkyChart / Cartes du Ciel",
-            command=self.send_selected_ephemeris_to_cdc
-        )
-        self.ephem_context_menu.add_command(
             label="Slew telescope via SkyChart...",
             command=self.slew_selected_ephemeris_via_cdc
         )
         self.ephem_context_menu.add_separator()
         self.ephem_context_menu.add_command(
-            label="Export selected row to CdC Observing List",
-            command=self.export_selected_ephemeris_to_cdc_obslist
-        )
-        self.ephem_context_menu.add_command(
-            label="Export all rows to CdC Observing List",
+            label="Load ephemeris trail in CdC Observing List",
             command=self.export_all_ephemerides_to_cdc_obslist
         )
         self.ephem_tree.bind("<Button-3>", self._show_ephemeris_context_menu)
@@ -1519,14 +1511,10 @@ class NEOTrackerApp:
                              activeforeground='#ffffff')
         menubar.add_cascade(label="Tools", menu=tools_menu)
         tools_menu.add_command(label="NEOFIXER Targets", command=self.run_neofixer)
-        tools_menu.add_command(label="Send Selected Ephemeris to Cartes du Ciel",
-                               command=self.send_selected_ephemeris_to_cdc)
+        tools_menu.add_separator()
         tools_menu.add_command(label="Slew Telescope via Cartes du Ciel...",
                                command=self.slew_selected_ephemeris_via_cdc)
-        tools_menu.add_separator()
-        tools_menu.add_command(label="Export Selected Row to CdC Observing List",
-                               command=self.export_selected_ephemeris_to_cdc_obslist)
-        tools_menu.add_command(label="Export All Ephemeris Rows to CdC Observing List",
+        tools_menu.add_command(label="Load Ephemeris Trail in CdC Observing List",
                                command=self.export_all_ephemerides_to_cdc_obslist)
         tools_menu.add_separator()
         tools_menu.add_command(label="Refresh NEOCP List", command=self._start_neocp_load)
@@ -1638,7 +1626,7 @@ class NEOTrackerApp:
         self.root.after(0, lambda: self.submit_button.configure(state='disabled'))
         self.root.after(0, lambda: self.progress.pack(pady=4))
         self.root.after(0, self.progress.start)
-        step_size_for_status = self.step_size_var.get().strip() if hasattr(self, 'step_size_var') else "10m"
+        step_size_for_status = self.step_size_var.get().strip() if hasattr(self, 'step_size_var') else "1h"
         self.root.after(0, lambda: self.status_bar.config(
             text=f"Querying Project Pluto online Find_Orb… step={step_size_for_status}"))
 
@@ -1647,7 +1635,7 @@ class NEOTrackerApp:
             # No local executable, no OBS80 temporary files, no path configuration.
             eph_steps_int = int(self.eph_steps_entry.get())
 
-            step_size = self.step_size_var.get().strip() or "10m"
+            step_size = self.step_size_var.get().strip() or "1h"
 
             pp_html = fetch_project_pluto_ephemeris(
                 target_object=target_object,
@@ -1719,7 +1707,7 @@ class NEOTrackerApp:
             self.eph_steps_entry.delete(0, tk.END)
             self.eph_steps_entry.insert(0, "10")
             if hasattr(self, 'step_size_var'):
-                self.step_size_var.set("10m")
+                self.step_size_var.set("1h")
 
             self._clear_results()
             self.status_bar.config(text="Ready")
@@ -2014,66 +2002,6 @@ class NEOTrackerApp:
         columns = list(self.ephem_tree['columns'])
         return {col: values[i] if i < len(values) else '' for i, col in enumerate(columns)}
 
-    def send_selected_ephemeris_to_cdc(self):
-        """Send the selected ephemeris RA/Dec to Cartes du Ciel/SkyChart.
-
-        This only centers the CdC chart. It does not slew the telescope.
-        NINA can then capture the coordinates from CdC using its normal
-        Planetarium/Framing workflow.
-        """
-        if not CDC_AVAILABLE or send_coordinates_to_cdc is None:
-            messagebox.showerror(
-                "Cartes du Ciel integration unavailable",
-                "The Cartes du Ciel helper module was not found.\n"
-                "Make sure cartes_du_ciel.py is in the same folder as NEO_Tracker.py."
-            )
-            return
-
-        row = self._selected_ephemeris_row()
-        if not row:
-            messagebox.showinfo(
-                "No ephemeris selected",
-                "Select one row in the Ephemerides tab first."
-            )
-            return
-
-        ra = row.get('RA', '').strip()
-        dec = row.get('Dec', '').strip()
-        utc = row.get('UTC', '').strip()
-        if not ra or not dec:
-            messagebox.showerror(
-                "Invalid ephemeris row",
-                "The selected row does not contain valid RA/Dec coordinates."
-            )
-            return
-
-        target = self.target_object_entry.get().strip()
-        if target == self.target_object_placeholder:
-            target = "selected object"
-
-        # No confirmation/success dialog here: this command is intentionally
-        # lightweight for the normal workflow. The user can see CdC move, and
-        # errors are still reported if the hand-off fails.
-        self.status_bar.config(text=f"Sending {target} coordinates to Cartes du Ciel…")
-
-        def worker():
-            try:
-                replies = send_coordinates_to_cdc(ra, dec)
-                logger.info("Sent coordinates to Cartes du Ciel: target=%s UTC=%s RA=%s Dec=%s replies=%s", target, utc, ra, dec, replies)
-                self.root.after(0, lambda: self.status_bar.config(
-                    text=f"Sent to Cartes du Ciel: {target}  {utc}  RA {ra}  Dec {dec}"))
-            except Exception as exc:
-                logger.error("Cartes du Ciel integration failed: %s", exc)
-                self.root.after(0, lambda: self.status_bar.config(
-                    text="Cartes du Ciel send failed."))
-                self.root.after(0, lambda: messagebox.showerror(
-                    "Cartes du Ciel send failed",
-                    str(exc)
-                ))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-
     def _selected_ephemeris_altitude(self, row):
         """Return selected-row altitude as float, or None when unavailable."""
         raw_alt = str(row.get('Alt', '')).strip()
@@ -2298,25 +2226,34 @@ class NEOTrackerApp:
             self.status_bar.config(text="CdC Observing List export failed.")
             return
 
+        # Try to load the generated list directly into an already-running
+        # Cartes du Ciel/SkyChart session.  If CdC is not available, keep the
+        # file export as a successful operation and report only the load issue.
+        if CDC_AVAILABLE and load_observing_list_in_cdc is not None:
+            try:
+                replies = load_observing_list_in_cdc(path)
+                logger.info("Loaded CdC Observing List: path=%s replies=%s", path, replies)
+                self.status_bar.config(
+                    text=f"Saved and loaded CdC Observing List: {len(rows)} row(s)"
+                )
+                return
+            except Exception as exc:
+                logger.warning("Saved CdC Observing List, but auto-load failed: %s", exc)
+                self.status_bar.config(
+                    text=f"Saved CdC Observing List, but auto-load failed: {path}"
+                )
+                messagebox.showwarning(
+                    "CdC Observing List saved",
+                    "The observing-list file was saved, but NEO Tracker could not "
+                    "load it automatically into Cartes du Ciel.\n\n"
+                    f"File:\n{path}\n\n"
+                    f"CdC message:\n{exc}"
+                )
+                return
+
         self.status_bar.config(
             text=f"Saved CdC Observing List: {len(rows)} row(s) → {path}"
         )
-
-    def export_selected_ephemeris_to_cdc_obslist(self):
-        """Export only the currently selected ephemeris row as a CdC Observing List."""
-        row = self._selected_ephemeris_row()
-        if not row:
-            messagebox.showinfo(
-                "No ephemeris selected",
-                "Select one row in the Ephemerides tab first."
-            )
-            return
-
-        target = self.target_object_entry.get().strip()
-        if not target or target == self.target_object_placeholder:
-            target = "NEO_Target"
-        utc_token = re.sub(r'[^0-9]', '', row.get('UTC', '')) or 'selected'
-        self._write_cdc_obslist_file([row], f"cdc_obslist_{target}_{utc_token}")
 
     def export_all_ephemerides_to_cdc_obslist(self):
         """Export every displayed ephemeris row as a CdC Observing List trail."""
@@ -2435,9 +2372,9 @@ class NEOTrackerApp:
             "  List: https://minorplanetcenter.net/iau/lists/ObsCodes.html\n"
             "  Default in the GUI: X93. Change it directly before submitting.\n\n"
             "Step size:\n"
-            "  10m = use for fast NEOCP objects or precise hand-off to SkyChart/NINA.\n"
+            "  1h  = default; useful for general planning and slower known objects.\n"
             "  30m = useful for moderate NEOCP objects.\n"
-            "  1h  = useful for slower known objects.\n"
+            "  10m = use for fast NEOCP objects or precise hand-off to SkyChart/NINA.\n"
             "  1d  = useful for multi-day planning.\n\n"
             "Ephemeris columns:\n"
             "  Rate \"/min = apparent sky motion in arcsec/min.\n"
