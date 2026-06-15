@@ -200,7 +200,14 @@ def fetch_project_pluto_ephemeris(target_object, obs_code="X93", eph_steps=10, s
         "faint_limit": 99,
         "ephem_type": 0,
         "sigmas": "on",
-        "element_center": -2,
+        # Force heliocentric (Sun-centered) elements. With the "automatic"
+        # setting (-2) Find_Orb returns GEOCENTRIC elements for short-arc
+        # near-Earth objects ("Perigee"/"(J2000 equator)"), whose eccentricity
+        # is relative to Earth (e >> 1 for any flyby) and has no semi-major
+        # axis. That produced spurious "hyperbolic/interstellar" flags and made
+        # the orbit incomparable to the MPC. 0 = Sun keeps every object
+        # heliocentric, matching the MPC.
+        "element_center": 0,
         "epoch": "default",
         "resids": 0,
         "language": "e",
@@ -736,6 +743,18 @@ def parse_summary(elements_content, eph_content, target_object, object_category=
 
     metadata_text = elements_content + "\n" + eph_content
 
+    # Detect a geocentric (Earth-centered) elements block. Find_Orb falls back
+    # to this for some short-arc near-Earth objects: it prints "Perigee" and
+    # "(J2000 equator)" instead of "Perihelion"/"(J2000 ecliptic)", and the
+    # eccentricity is then relative to Earth (e >> 1 for any flyby), with no
+    # semi-major axis. We request heliocentric elements (element_center=0), so
+    # this should not happen, but guard against it to avoid false interstellar
+    # flags if the server ever returns a geocentric solution.
+    geocentric = bool(
+        re.search(r'J2000\s+equator', elements_content)
+        or re.search(r'^\s*Perigee\b', elements_content, re.MULTILINE)
+    )
+
     # ------------------------------------------------------------------ #
     # 1. Parse orbital / physical metadata
     # ------------------------------------------------------------------ #
@@ -924,8 +943,11 @@ def parse_summary(elements_content, eph_content, target_object, object_category=
     except ValueError:
         pha = False
 
+    # Only a heliocentric eccentricity >= 1 indicates a (possibly interstellar)
+    # hyperbolic orbit. A geocentric solution always has e >> 1 and says nothing
+    # about heliocentric dynamics, so never flag it as hyperbolic.
     try:
-        hyperbolic = float(ecc) >= 1.0
+        hyperbolic = (not geocentric) and float(ecc) >= 1.0
     except ValueError:
         hyperbolic = False
 
