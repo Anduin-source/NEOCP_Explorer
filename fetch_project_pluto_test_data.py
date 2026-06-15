@@ -34,7 +34,7 @@ BASE_PARAMS = {
 }
 
 HEADERS = {
-    "User-Agent": "NEO Tracker parser fixture downloader (https://github.com/Anduin-source/NEOS_Tracker)"
+    "User-Agent": "NEOCP Explorer parser fixture downloader (https://github.com/Anduin-source/NEOCP_Explorer)"
 }
 
 

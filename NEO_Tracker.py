@@ -216,8 +216,8 @@ def fetch_project_pluto_ephemeris(target_object, obs_code="X93", eph_steps=10, s
 
     headers = {
         "User-Agent": (
-            "NEO Tracker/3.0 "
-            "(https://github.com/Anduin-source/NEOS_Tracker)"
+            "NEOCP Explorer/3.1 "
+            "(https://github.com/Anduin-source/NEOCP_Explorer)"
         )
     }
 
@@ -2447,7 +2447,7 @@ class NEOTrackerApp:
             "Configuration:\n"
             "  This version no longer uses config.ini or a local Find_Orb path.\n\n"
             "Logs: app.log\n"
-            "Support: https://github.com/Anduin-source/NEOS_Tracker/issues"
+            "Support: https://github.com/Anduin-source/NEOCP_Explorer/issues"
         )
         win = tk.Toplevel(self.root)
         win.title("User Manual")
