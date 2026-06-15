@@ -1205,7 +1205,7 @@ class NEOTrackerApp:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("NEO Tracker v3.0")
+        self.root.title("NEOCP Explorer v3.1")
         self.root.geometry("1400x800")
         self.root.configure(bg=C['bg'])
         self.root.minsize(900, 600)
@@ -2266,7 +2266,7 @@ class NEOTrackerApp:
         if not path:
             return
 
-        lines = [f"NEO Tracker - {target} ephemeris"]
+        lines = [f"NEOCP Explorer - {target} ephemeris"]
         # Keep the CdC object name short.  The UTC of each ephemeris point is
         # stored in the label and description, so the sky-map label remains
         # readable while every row is still uniquely documented.
@@ -2397,7 +2397,7 @@ class NEOTrackerApp:
     def show_about(self):
         messagebox.showinfo(
             "About",
-            "NEO Tracker v3.0\n"
+            "NEOCP Explorer v3.1\n"
             "Developed by Andre Brossel\n\n"
             "Ephemerides and orbital solutions:\n"
             "  Project Pluto / Find_Orb by Bill Gray\n"
@@ -2408,7 +2408,7 @@ class NEOTrackerApp:
             "  Astropy\n\n"
             "Optional target information:\n"
             "  NEOFIXER\n\n"
-            "NEO Tracker is an independent project and is not affiliated "
+            "NEOCP Explorer is an independent project and is not affiliated "
             "with Project Pluto, the Minor Planet Center, JPL, NEOFIXER, "
             "Astropy, or Cartes du Ciel."
         )
@@ -2416,7 +2416,7 @@ class NEOTrackerApp:
     def show_help(self):
         help_text = (
             "User Manual\n\n"
-            "NEO Tracker calculates ephemerides and orbital elements "
+            "NEOCP Explorer calculates ephemerides and orbital elements "
             "for NEOs and NEOCP candidates.\n\n"
             "Quick start:\n"
             "1. The NEOCP panel on the left loads candidates automatically.\n"

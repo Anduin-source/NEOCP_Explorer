@@ -1,7 +1,7 @@
-"""Small Cartes du Ciel / SkyChart TCP client for NEO Tracker.
+"""Small Cartes du Ciel / SkyChart TCP client for NEOCP Explorer.
 
 This module communicates with the Cartes du Ciel/SkyChart TCP/IP server.
-It intentionally keeps only the workflows used by NEO Tracker:
+It intentionally keeps only the workflows used by NEOCP Explorer:
 
     1. Load a generated CdC Observing List file.
     2. Ask CdC to slew the telescope to selected RA/Dec coordinates.

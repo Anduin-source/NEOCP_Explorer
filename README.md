@@ -1,8 +1,8 @@
-# NEO Tracker — Ephemeris Calculator
+# NEOCP Explorer — Ephemeris Calculator
 
-NEO Tracker is a desktop application for calculating ephemerides and orbital information for known near-Earth objects and current NEOCP candidates.
+NEOCP Explorer is a desktop application for calculating ephemerides and orbital information for known near-Earth objects and current NEOCP candidates.
 
-Version 3.0 removes the requirement for a local Find_Orb installation. Ephemerides and preliminary orbital solutions are obtained from the Project Pluto online Find_Orb service. The application uses MPC NEOCP data for the candidate list and Astropy for local topocentric Alt/Az and airmass calculations.
+The application does not require a local Find_Orb installation. Ephemerides and preliminary orbital solutions are obtained from the Project Pluto online Find_Orb service. The application uses MPC NEOCP data for the candidate list and Astropy for local topocentric Alt/Az and airmass calculations.
 
 ## Main features
 
@@ -130,14 +130,21 @@ If the observatory code is not in the local coordinate table, Alt/Az may be unav
 
 ## Data sources and acknowledgements
 
-NEO Tracker relies on several excellent public astronomy tools and services:
+NEOCP Explorer relies on several excellent public astronomy tools and services:
 
-- **Project Pluto / Find_Orb, by Bill Gray** — online orbit determination and ephemeris service used by NEO Tracker to compute orbital elements, residuals, uncertainties, and ephemerides.
+- **Project Pluto / Find_Orb, by Bill Gray** — online orbit determination and ephemeris service used by NEOCP Explorer to compute orbital elements, residuals, uncertainties, and ephemerides.
 - **Minor Planet Center (MPC)** — source of the NEOCP candidate list and minor-planet observational data.
 - **Astropy** — used locally for topocentric Alt/Az and airmass calculations.
 - **NEOFIXER** — optional target-priority information for observatory-specific follow-up planning.
 
-NEO Tracker is an independent project and is not affiliated with Project Pluto, the Minor Planet Center, JPL, NEOFIXER, or Astropy.
+NEOCP Explorer is an independent project and is not affiliated with Project Pluto, the Minor Planet Center, JPL, NEOFIXER, or Astropy.
+
+## Version 3.1 highlights
+
+- Renamed the application to **NEOCP Explorer**.
+- Forced heliocentric orbital elements, fixing spurious "interstellar" flags caused by geocentric Find_Orb solutions for short-arc near-Earth objects.
+- Handled negative semi-major axis for genuinely hyperbolic heliocentric orbits.
+- Displayed the eccentricity uncertainty and flagged poorly constrained (short-arc) orbits; the interstellar flag now requires a statistically significant hyperbolic excess.
 
 ## Version 3.0 highlights
 
