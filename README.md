@@ -36,7 +36,7 @@ astropy
 ## Running from source
 
 ```bash
-python NEO_Tracker.py
+python neocp_explorer.py
 ```
 
 The app requires an internet connection because it queries:
@@ -94,7 +94,7 @@ python -m pip install pyinstaller
 Build:
 
 ```bash
-python -m PyInstaller --onefile --windowed --icon=neo_tracker.ico --name="NEO_Tracker" NEO_Tracker.py
+python -m PyInstaller --onefile --windowed --icon=neocp_explorer.ico --name="NEOCP_Explorer" neocp_explorer.py
 ```
 
 The resulting executable is created under `dist/`.

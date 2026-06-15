@@ -1210,7 +1210,7 @@ class NEOTrackerApp:
         self.root.configure(bg=C['bg'])
         self.root.minsize(900, 600)
         try:
-            self.root.iconbitmap(resource_path("neo_tracker.ico"))
+            self.root.iconbitmap(resource_path("neocp_explorer.ico"))
         except Exception:
             # Keep the app usable even if the icon resource is missing.
             pass
@@ -2081,7 +2081,7 @@ class NEOTrackerApp:
             messagebox.showerror(
                 "Cartes du Ciel integration unavailable",
                 "The Cartes du Ciel helper module was not found.\n"
-                "Make sure cartes_du_ciel.py is in the same folder as NEO_Tracker.py."
+                "Make sure cartes_du_ciel.py is in the same folder as neocp_explorer.py."
             )
             return
 

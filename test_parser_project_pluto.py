@@ -1,14 +1,14 @@
 """Regression tests for the Project Pluto parser.
 
 These tests do not call the internet. They read saved HTML responses from
-Project Pluto and verify that NEO_Tracker.py can still parse them.
+Project Pluto and verify that neocp_explorer.py can still parse them.
 
 Run from the repository root:
     python test_parser_project_pluto.py
 """
 from pathlib import Path
 
-from NEO_Tracker import split_project_pluto_output, parse_ephemeris_table_for_ui
+from neocp_explorer import split_project_pluto_output, parse_ephemeris_table_for_ui
 
 
 DATA_DIR = Path("test_data")
