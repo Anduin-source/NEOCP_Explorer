@@ -765,6 +765,10 @@ def parse_summary(elements_content, eph_content, target_object, object_category=
 
     perihelion = _get(r'Perihelion\s+(\d{4}\s+\w+\s+[\d.]+)', elements_content)
     ecc        = _get(r'\be\s+([\d.]+)', elements_content)
+    # Eccentricity 1-sigma uncertainty (may be in scientific notation, e.g.
+    # "1.26e-8"). A short observation arc leaves e essentially unconstrained,
+    # which Find_Orb reports as a large sigma here.
+    ecc_sigma  = _get(r'\be\s+[\d.]+\s+\+/-\s+([0-9.eE+-]+)', elements_content)
     incl       = _get(r'Incl\.\s+([\d.]+)', elements_content)
     a_au       = _get(r'\ba\s+(-?[\d.]+)', elements_content)
     tisserand  = _get(r'Tisserand relative to Earth:\s+([\d.]+)', metadata_text)
@@ -947,13 +951,31 @@ def parse_summary(elements_content, eph_content, target_object, object_category=
     except ValueError:
         pha = False
 
+    # A large sigma on e means the orbit is poorly constrained (typically a
+    # very short observation arc), so the eccentricity value is not meaningful.
+    try:
+        sig_e = float(ecc_sigma)
+        poorly_constrained = sig_e >= 0.1
+    except ValueError:
+        sig_e = None
+        poorly_constrained = False
+
     # Only a heliocentric eccentricity >= 1 indicates a (possibly interstellar)
     # hyperbolic orbit. A geocentric solution always has e >> 1 and says nothing
-    # about heliocentric dynamics, so never flag it as hyperbolic.
+    # about heliocentric dynamics, so never flag it as hyperbolic. A short-arc
+    # fit with a huge sigma can land at e >= 1 by chance, so only call it a
+    # *significant* (possible interstellar) hyperbolic orbit when e exceeds 1 by
+    # more than 3 sigma.
     try:
-        hyperbolic = (not geocentric) and float(ecc) >= 1.0
+        e_val_flag = (not geocentric) and float(ecc)
+        hyperbolic = bool(e_val_flag) and e_val_flag >= 1.0
+        if hyperbolic and sig_e is not None:
+            hyperbolic_significant = (e_val_flag - 3.0 * sig_e) > 1.0
+        else:
+            hyperbolic_significant = hyperbolic
     except ValueError:
         hyperbolic = False
+        hyperbolic_significant = False
 
     try:
         earth_crossing = float(moid) < 0.05
@@ -967,8 +989,11 @@ def parse_summary(elements_content, eph_content, target_object, object_category=
     W = 'summary_warning'
     blocks = []
 
-    if hyperbolic:
+    if hyperbolic_significant:
         blocks.append(("⚠  HYPERBOLIC ORBIT (e ≥ 1) — POSSIBLE INTERSTELLAR OBJECT\n", W))
+    elif hyperbolic:
+        blocks.append(("⚠  Hyperbolic best-fit (e ≥ 1) but poorly constrained — "
+                       "likely short-arc artifact, not interstellar\n", W))
     if pha:
         blocks.append(("⚠  POTENTIALLY HAZARDOUS ASTEROID (PHA) — MOID < 0.05 AU  &  H < 22\n", W))
     elif earth_crossing:
@@ -976,6 +1001,8 @@ def parse_summary(elements_content, eph_content, target_object, object_category=
 
     if blocks:
         blocks.append(("\n", S))
+
+    ecc_display = ecc if ecc_sigma == 'N/A' else f"{ecc} ± {ecc_sigma}"
 
     blocks += [
         (f"Object          : {target_object}\n", S),
@@ -988,13 +1015,16 @@ def parse_summary(elements_content, eph_content, target_object, object_category=
         (f"\n", S),
         (f"── Orbit ─────────────────────────────────\n", S),
         (f"Semi-major axis : {a_au} AU\n", S),
-        (f"Eccentricity    : {ecc}", S),
+        (f"Eccentricity    : {ecc_display}", S),
     ]
 
     if hyperbolic:
         blocks.append(("  ← hyperbolic\n", W))
     else:
         blocks.append(("\n", S))
+    if poorly_constrained:
+        blocks.append(("                  ↳ poorly constrained (short arc) — "
+                       "eccentricity uncertain\n", W))
 
     blocks += [
         (f"Inclination     : {incl}°\n", S),
