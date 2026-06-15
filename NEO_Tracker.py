@@ -766,7 +766,7 @@ def parse_summary(elements_content, eph_content, target_object, object_category=
     perihelion = _get(r'Perihelion\s+(\d{4}\s+\w+\s+[\d.]+)', elements_content)
     ecc        = _get(r'\be\s+([\d.]+)', elements_content)
     incl       = _get(r'Incl\.\s+([\d.]+)', elements_content)
-    a_au       = _get(r'\ba\s+([\d.]+)', elements_content)
+    a_au       = _get(r'\ba\s+(-?[\d.]+)', elements_content)
     tisserand  = _get(r'Tisserand relative to Earth:\s+([\d.]+)', metadata_text)
     tisserand_jup = _get(r'Tisserand relative to Jupiter:\s+([\d.]+)', metadata_text)
     h_mag      = _get(r'\bH\s+([\d.]+)', elements_content)
@@ -911,7 +911,11 @@ def parse_summary(elements_content, eph_content, target_object, object_category=
         e_val = float(ecc)
         q = a_val * (1.0 - e_val)
         Q = a_val * (1.0 + e_val)
-        if a_val < 1.0 and Q < EARTH_q:
+        if not geocentric and e_val >= 1.0:
+            # Hyperbolic heliocentric orbit: a is negative and Q is meaningless,
+            # so the Aten/Atira (a < 1) branches below must not be reached.
+            neo_subclass = "Hyperbolic / unbound orbit (e ≥ 1)"
+        elif a_val < 1.0 and Q < EARTH_q:
             neo_subclass = "Atira (orbit interior to Earth's)"
         elif a_val < 1.0:
             neo_subclass = "Aten (a < 1 AU, crosses Earth's orbit)"
