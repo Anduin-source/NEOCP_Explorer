@@ -94,7 +94,7 @@ python -m pip install pyinstaller
 Build:
 
 ```bash
-python -m PyInstaller --onefile --windowed --icon=neocp_explorer.ico --name="NEOCP_Explorer" neocp_explorer.py
+python -m PyInstaller --onefile --windowed --icon=neocp_explorer.ico --add-data "neocp_explorer.ico;." --name="NEOCP_Explorer" neocp_explorer.py
 ```
 
 The resulting executable is created under `dist/`.
