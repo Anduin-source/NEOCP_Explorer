@@ -198,6 +198,13 @@ NEOCP Explorer is an independent project and is not affiliated with Project Plut
 
 ## Changelog
 
+### v3.1.1 (2026-07-18)
+- Fixed deferred MPC NEOCP and Cartes du Ciel error callbacks that could raise `NameError` instead of showing the original failure.
+- Captured Tkinter form values on the UI thread before starting background network work.
+- Fixed compact orbital-element display for hyperbolic solutions with a negative semi-major axis.
+- Aligned Project Pluto fixture generation with the heliocentric production request.
+- Added focused regression tests and validated the Windows executable on the Pier 2 observatory PC.
+
 ### v3.1 (2026-06-15)
 - Renamed the application to **NEOCP Explorer**.
 - Forced heliocentric orbital elements, fixing spurious interstellar flags caused by geocentric Find_Orb solutions for short-arc near-Earth objects.
@@ -384,6 +391,13 @@ O NEOCP Explorer é um projeto independente e não tem afiliação com o Project
 ---
 
 ## Histórico de versões
+
+### v3.1.1 (2026-07-18)
+- Corrigidos os callbacks adiados de erro do MPC NEOCP e do Cartes du Ciel, que podiam gerar `NameError` em vez de mostrar a falha original.
+- Os valores do formulário Tkinter agora são capturados na thread da interface antes do trabalho de rede em segundo plano.
+- Corrigida a exibição compacta de elementos orbitais para soluções hiperbólicas com semieixo maior negativo.
+- O gerador de fixtures do Project Pluto foi alinhado à requisição heliocêntrica usada em produção.
+- Adicionados testes de regressão direcionados e validado o executável Windows no computador do observatório Pier 2.
 
 ### v3.1 (2026-06-15)
 - Programa renomeado para **NEOCP Explorer**.
