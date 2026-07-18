@@ -26,7 +26,9 @@ BASE_PARAMS = {
     "faint_limit": 99,
     "ephem_type": 0,
     "sigmas": "on",
-    "element_center": -2,
+    # Keep fixtures aligned with the production request: heliocentric elements
+    # prevent short-arc geocentric solutions from looking hyperbolic.
+    "element_center": 0,
     "epoch": "default",
     "resids": 0,
     "language": "e",
