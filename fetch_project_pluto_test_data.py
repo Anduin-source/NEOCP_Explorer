@@ -1,21 +1,20 @@
-"""Download small Project Pluto HTML fixtures for parser regression tests.
+"""Download Project Pluto responses for local parser diagnostics.
+
+Downloaded responses are third-party material. They are stored only under the
+Git-ignored .local_test_data directory and must not be committed or
+redistributed. The repository's automated tests use synthetic fixtures instead.
 
 Run from the repository root:
     python fetch_project_pluto_test_data.py
-
-If a NEOCP designation is no longer available, replace A11D0Xd below with a
-current NEOCP candidate from the left panel of the app.
 """
 from pathlib import Path
 import requests
 
 PROJECT_PLUTO_URL = "https://www.projectpluto.com/cgi-bin/fo/fo_serve.cgi"
 
-# Keep one known object and one NEOCP-style object.
-# If A11D0Xd disappears from NEOCP, replace it with a current candidate.
 OBJECTS = {
-    "project_pluto_A11D0Xd.html": "A11D0Xd",
-    "project_pluto_99942.html": "99942",
+    "project_pluto_current_neocp.html": "A11D0Xd",
+    "project_pluto_known_object.html": "99942",
 }
 
 BASE_PARAMS = {
@@ -26,8 +25,6 @@ BASE_PARAMS = {
     "faint_limit": 99,
     "ephem_type": 0,
     "sigmas": "on",
-    # Keep fixtures aligned with the production request: heliocentric elements
-    # prevent short-arc geocentric solutions from looking hyperbolic.
     "element_center": 0,
     "epoch": "default",
     "resids": 0,
@@ -36,33 +33,45 @@ BASE_PARAMS = {
 }
 
 HEADERS = {
-    "User-Agent": "NEOCP Explorer parser fixture downloader (https://github.com/Anduin-source/NEOCP_Explorer)"
+    "User-Agent": (
+        "NEOCP Explorer local parser diagnostics "
+        "(https://github.com/Anduin-source/NEOCP_Explorer)"
+    )
 }
+
+LOCAL_DATA_DIR = Path(".local_test_data")
 
 
 def download_fixture(filename: str, object_name: str) -> None:
     params = dict(BASE_PARAMS)
     params["obj_name"] = object_name
 
-    print(f"Downloading {object_name} ...")
-    response = requests.get(PROJECT_PLUTO_URL, params=params, headers=HEADERS, timeout=30)
+    print(f"Downloading {object_name} for local diagnostics ...")
+    response = requests.get(
+        PROJECT_PLUTO_URL,
+        params=params,
+        headers=HEADERS,
+        timeout=30,
+    )
     response.raise_for_status()
 
     text = response.text
     if "Ephemerides for" not in text:
         raise RuntimeError(
-            f"Project Pluto did not return an ephemeris table for {object_name}.\n"
-            "If this is the NEOCP object, replace it with a current candidate."
+            f"Project Pluto did not return an ephemeris table for {object_name}."
         )
 
-    out_dir = Path("test_data")
-    out_dir.mkdir(exist_ok=True)
-    out_path = out_dir / filename
+    LOCAL_DATA_DIR.mkdir(exist_ok=True)
+    out_path = LOCAL_DATA_DIR / filename
     out_path.write_text(text, encoding="utf-8")
-    print(f"Saved {out_path}")
+    print(f"Saved local-only response to {out_path}")
 
 
 def main() -> None:
+    print(
+        "NOTICE: downloaded responses are for local diagnostics only; "
+        "do not commit or redistribute them."
+    )
     for filename, object_name in OBJECTS.items():
         download_fixture(filename, object_name)
     print("Done.")
