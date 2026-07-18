@@ -211,6 +211,10 @@ NEOCP Explorer relies on several excellent public tools and services:
 
 NEOCP Explorer is an independent project and is not affiliated with Project Pluto, the Minor Planet Center, JPL, NEOFIXER, Astropy, or Cartes du Ciel.
 
+The MIT License covers the original NEOCP Explorer source code only. External services, software, data, responses, and trademarks remain subject to their providers' current terms. In particular, Project Pluto states that use of Find_Orb in or with commercial software requires written permission. See [Third-party services and data](THIRD_PARTY_NOTICES.md).
+
+> **Preliminary data:** NEOCP candidates and orbital solutions can change rapidly as new observations arrive. Verify current data with the original providers before critical observing or telescope-control operations.
+
 ---
 
 ## Changelog
@@ -404,6 +408,10 @@ O NEOCP Explorer depende de excelentes ferramentas e serviços públicos:
 - **NEOFIXER (Universidade do Arizona)** — informações opcionais de prioridade de alvos para planejamento de follow-up por observatório.
 
 O NEOCP Explorer é um projeto independente e não tem afiliação com o Project Pluto, o Minor Planet Center, o JPL, o NEOFIXER, o Astropy ou o Cartes du Ciel.
+
+A licença MIT cobre apenas o código-fonte original do NEOCP Explorer. Serviços, softwares, dados, respostas e marcas externas permanecem sujeitos aos termos atuais de seus provedores. Em particular, o Project Pluto informa que o uso do Find_Orb em conjunto com software comercial requer autorização escrita. Consulte [Serviços e dados de terceiros](THIRD_PARTY_NOTICES.md).
+
+> **Dados preliminares:** candidatos NEOCP e soluções orbitais podem mudar rapidamente à medida que novas observações são recebidas. Confirme os dados atuais nas fontes originais antes de operações críticas de observação ou controle do telescópio.
 
 ---
 
