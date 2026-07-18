@@ -10,6 +10,36 @@ def test_app_version_matches_patch_release():
     assert neocp_explorer.APP_VERSION == "3.1.1"
 
 
+def test_service_get_identifies_app_and_retries_temporary_failure(monkeypatch):
+    class FakeResponse:
+        def __init__(self, status_code):
+            self.status_code = status_code
+            self.headers = {}
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.exceptions.HTTPError(str(self.status_code))
+
+    calls = []
+    responses = [FakeResponse(503), FakeResponse(200)]
+
+    def fake_get(*args, **kwargs):
+        calls.append((args, kwargs))
+        return responses.pop(0)
+
+    monkeypatch.setattr(neocp_explorer.requests, "get", fake_get)
+    monkeypatch.setattr(neocp_explorer.time, "sleep", lambda _seconds: None)
+
+    response = neocp_explorer._service_get(
+        "https://example.invalid/service",
+        timeout=10,
+    )
+
+    assert response.status_code == 200
+    assert len(calls) == 2
+    assert calls[0][1]["headers"] == neocp_explorer.HTTP_HEADERS
+
+
 class _FakeRoot:
     def __init__(self):
         self.callbacks = []
