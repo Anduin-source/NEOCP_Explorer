@@ -9,6 +9,7 @@ import re
 import logging
 import threading
 import math
+import time
 from datetime import datetime
 import pandas as pd
 
@@ -118,6 +119,39 @@ PROJECT_PLUTO_URL = "https://www.projectpluto.com/cgi-bin/fo/fo_serve.cgi"
 APP_VERSION = "3.1.1"
 LD_PER_AU = 389.17  # mean lunar distances per astronomical unit
 
+HTTP_HEADERS = {
+    "User-Agent": (
+        f"NEOCP Explorer/{APP_VERSION} "
+        "(https://github.com/Anduin-source/NEOCP_Explorer)"
+    )
+}
+RETRYABLE_HTTP_STATUS = {429, 502, 503, 504}
+NEOCP_CACHE_TTL_SECONDS = 300
+NEOCP_MIN_REFRESH_SECONDS = 30
+
+
+def _service_get(url, *, timeout, params=None):
+    """GET a public service with identification and one bounded retry."""
+    for attempt in range(2):
+        response = requests.get(
+            url,
+            params=params,
+            headers=HTTP_HEADERS,
+            timeout=timeout,
+        )
+        if response.status_code not in RETRYABLE_HTTP_STATUS or attempt == 1:
+            response.raise_for_status()
+            return response
+
+        retry_after = response.headers.get("Retry-After", "1")
+        try:
+            delay = float(retry_after)
+        except (TypeError, ValueError):
+            delay = 1.0
+        time.sleep(max(0.5, min(delay, 5.0)))
+
+    raise requests.exceptions.RequestException("External service request failed.")
+
 
 def resource_path(relative_path):
     """Return absolute path to a bundled resource.
@@ -215,12 +249,7 @@ def fetch_project_pluto_ephemeris(target_object, obs_code="X93", eph_steps=10, s
         "file_no": 0,
     }
 
-    headers = {
-        "User-Agent": (
-            f"NEOCP Explorer/{APP_VERSION} "
-            "(https://github.com/Anduin-source/NEOCP_Explorer)"
-        )
-    }
+    headers = HTTP_HEADERS
 
     try:
         response = requests.get(
@@ -1220,6 +1249,9 @@ class NEOTrackerApp:
 
         self._processing = False
         self.neocp_designations = set()
+        self._neocp_cache_data = None
+        self._neocp_cache_monotonic = 0.0
+        self._neocp_last_request_monotonic = 0.0
 
         self._apply_theme()
         self.create_layout()
@@ -1356,9 +1388,12 @@ class NEOTrackerApp:
                                              style='Counter.TLabel')
         self.neocp_counter_label.pack(side='left', padx=(8, 0))
 
-        refresh_btn = ttk.Button(header_frame, text="↻  Refresh",
-                                 style='Secondary.TButton',
-                                 command=self._start_neocp_load)
+        refresh_btn = ttk.Button(
+            header_frame,
+            text="↻  Refresh",
+            style='Secondary.TButton',
+            command=lambda: self._start_neocp_load(force=True),
+        )
         refresh_btn.pack(side='right')
         Tooltip(refresh_btn, "Reload NEOCP candidates from MPC")
 
@@ -1576,7 +1611,10 @@ class NEOTrackerApp:
         tools_menu.add_command(label="Load Ephemeris Trail in CdC Observing List",
                                command=self.export_all_ephemerides_to_cdc_obslist)
         tools_menu.add_separator()
-        tools_menu.add_command(label="Refresh NEOCP List", command=self._start_neocp_load)
+        tools_menu.add_command(
+            label="Refresh NEOCP List",
+            command=lambda: self._start_neocp_load(force=True),
+        )
 
         help_menu = tk.Menu(menubar, tearoff=0, background=C['panel'],
                             foreground=C['fg'], activebackground=C['accent'],
@@ -1897,23 +1935,49 @@ class NEOTrackerApp:
     # NEOCP — integrated left panel
     # ------------------------------------------------------------------
 
-    def _start_neocp_load(self):
+    def _start_neocp_load(self, force=False):
         self.neocp_loading_label.configure(text="Loading candidates…")
         self.neocp_progress.pack(pady=(0, 6))
         self.neocp_progress.start()
         self.neocp_counter_label.configure(text="")
         for row in self.neocp_tree.get_children():
             self.neocp_tree.delete(row)
-        thread = threading.Thread(target=self._fetch_neocp_data, daemon=True)
+        thread = threading.Thread(
+            target=self._fetch_neocp_data,
+            args=(force,),
+            daemon=True,
+        )
         thread.start()
 
-    def _fetch_neocp_data(self):
+    def _fetch_neocp_data(self, force=False):
         url = "https://www.minorplanetcenter.net/Extended_Files/neocp.json"
+        now = time.monotonic()
+        cached_data = getattr(self, "_neocp_cache_data", None)
+        cache_time = getattr(self, "_neocp_cache_monotonic", 0.0)
+        last_request = getattr(self, "_neocp_last_request_monotonic", 0.0)
+
+        cache_is_fresh = (
+            cached_data is not None
+            and now - cache_time < NEOCP_CACHE_TTL_SECONDS
+        )
+        refresh_is_too_soon = (
+            cached_data is not None
+            and now - last_request < NEOCP_MIN_REFRESH_SECONDS
+        )
+        if (cache_is_fresh and not force) or refresh_is_too_soon:
+            self.root.after(
+                0,
+                lambda data=cached_data: self._populate_neocp_panel(data),
+            )
+            return
+
         try:
-            response = requests.get(url, timeout=15)
-            response.raise_for_status()
+            self._neocp_last_request_monotonic = now
+            response = _service_get(url, timeout=15)
             data = response.json()
-            self.root.after(0, lambda: self._populate_neocp_panel(data))
+            self._neocp_cache_data = data
+            self._neocp_cache_monotonic = time.monotonic()
+            self.root.after(0, lambda data=data: self._populate_neocp_panel(data))
         except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching NEOCP: {e}")
             self.root.after(0, self._neocp_load_error, str(e))
@@ -2335,8 +2399,11 @@ class NEOTrackerApp:
             site_code = self.obs_code_entry.get()
             if not site_code or site_code == self.obs_code_placeholder:
                 site_code = 'X93'
-            response = requests.get(
-                f'https://neofixerapi.arizona.edu/targets/?site={site_code}&num=40', timeout=20)
+            response = _service_get(
+                "https://neofixerapi.arizona.edu/targets/",
+                params={"site": site_code, "num": 40},
+                timeout=20,
+            )
             response.raise_for_status()
             data = response.json()
         except requests.exceptions.RequestException as e:
@@ -2417,7 +2484,10 @@ class NEOTrackerApp:
             "  NEOFIXER\n\n"
             "NEOCP Explorer is an independent project and is not affiliated "
             "with Project Pluto, the Minor Planet Center, JPL, NEOFIXER, "
-            "Astropy, or Cartes du Ciel."
+            "Astropy, or Cartes du Ciel.\n\n"
+            "NEOCP candidates and preliminary solutions can change rapidly. "
+            "Verify current source data before critical observing or "
+            "telescope-control operations."
         )
 
     def show_help(self):
