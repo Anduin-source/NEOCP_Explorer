@@ -1,12 +1,24 @@
 # NEOCP Explorer — Ephemeris Calculator
 
-**NEOCP Explorer** is a desktop application for calculating ephemerides and orbital information for known near-Earth objects and current NEOCP candidates.
+<p align="center">
+  <a href="https://github.com/Anduin-source/NEOCP_Explorer/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/Anduin-source/NEOCP_Explorer?display_name=tag"></a>
+  <a href="https://github.com/Anduin-source/NEOCP_Explorer/releases"><img alt="Total downloads" src="https://img.shields.io/github/downloads/Anduin-source/NEOCP_Explorer/total"></a>
+  <a href="https://github.com/Anduin-source/NEOCP_Explorer/blob/main/LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/Anduin-source/NEOCP_Explorer"></a>
+  <img alt="Python 3.10+" src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white">
+  <img alt="Windows" src="https://img.shields.io/badge/platform-Windows-0078D4?logo=windows">
+</p>
+
+<p align="center">
+  <a href="https://github.com/Anduin-source/NEOCP_Explorer/releases/latest"><img alt="Download the latest release for Windows" src="https://img.shields.io/badge/Download_for_Windows-Latest_release-0078D4?style=for-the-badge&logo=windows&logoColor=white"></a>
+</p>
+
+**NEOCP Explorer** is a free and open-source Windows desktop application for calculating ephemerides and orbital information for known near-Earth objects and current NEOCP candidates.
 
 No local Find_Orb installation is required. Ephemerides and preliminary orbital solutions are obtained from the Project Pluto online Find_Orb service. The application uses MPC NEOCP data for the candidate list, Astropy for local topocentric Alt/Az and airmass calculations, and optionally integrates with Cartes du Ciel for telescope slewing via TCP.
 
 ---
 
-**NEOCP Explorer** é uma aplicação desktop para calcular efemérides e informações orbitais de objetos próximos da Terra conhecidos e candidatos NEOCP atuais.
+**NEOCP Explorer** é uma aplicação gratuita e de código aberto para Windows, destinada ao cálculo de efemérides e informações orbitais de objetos próximos da Terra conhecidos e candidatos NEOCP atuais.
 
 Não é necessária nenhuma instalação local do Find_Orb. Efemérides e soluções orbitais preliminares são obtidas do serviço online Find_Orb do Project Pluto. O programa usa dados NEOCP do MPC para a lista de candidatos, Astropy para cálculos topocêntricos locais de Alt/Az e massa de ar, e integra opcionalmente com o Cartes du Ciel para apontamento do telescópio via TCP.
 
@@ -45,7 +57,7 @@ Não é necessária nenhuma instalação local do Find_Orb. Efemérides e soluç
 
 ## Download
 
-Pre-built Windows executables are available on the [Releases page](https://github.com/Anduin-source/NEOCP_Explorer/releases).
+Pre-built Windows executables are available on the [Releases page](https://github.com/Anduin-source/NEOCP_Explorer/releases/latest).
 
 No Python installation required. Download the latest release and run `NEOCP_Explorer.exe` directly.
 
@@ -239,7 +251,7 @@ NEOCP Explorer is an independent project and is not affiliated with Project Plut
 
 ## Download
 
-Executáveis pré-compilados para Windows estão disponíveis na [página de Releases](https://github.com/Anduin-source/NEOCP_Explorer/releases).
+Executáveis pré-compilados para Windows estão disponíveis na [página de Releases](https://github.com/Anduin-source/NEOCP_Explorer/releases/latest).
 
 Não é necessário instalar Python. Baixe a versão mais recente e execute `NEOCP_Explorer.exe` diretamente.
 
