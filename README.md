@@ -22,6 +22,11 @@ No local Find_Orb installation is required. Ephemerides and preliminary orbital 
 
 Não é necessária nenhuma instalação local do Find_Orb. Efemérides e soluções orbitais preliminares são obtidas do serviço online Find_Orb do Project Pluto. O programa usa dados NEOCP do MPC para a lista de candidatos, Astropy para cálculos topocêntricos locais de Alt/Az e massa de ar, e integra opcionalmente com o Cartes du Ciel para apontamento do telescópio via TCP.
 
+<p align="center">
+  <img src="docs/images/neocp-explorer-ephemerides.jpg" alt="NEOCP Explorer v3.1.1 showing the live candidate list and calculated ephemerides" width="100%">
+</p>
+<p align="center"><em>Live NEOCP candidates and calculated ephemerides / Candidatos NEOCP atuais e efemérides calculadas</em></p>
+
 ---
 
 ## Table of Contents / Índice
