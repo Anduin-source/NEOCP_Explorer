@@ -27,3 +27,4 @@ error_log.txt
 
 # PyCharm
 .idea/
+.local_test_data/
