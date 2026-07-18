@@ -1,7 +1,7 @@
 """Regression tests for the Project Pluto parser.
 
-These tests do not call the internet. They read saved HTML responses from
-Project Pluto and verify that neocp_explorer.py can still parse them.
+These tests do not call the internet. They read compact synthetic HTML
+fixtures and verify that neocp_explorer.py can still parse the expected formats.
 
 Run from the repository root:
     python test_parser_project_pluto.py
@@ -11,7 +11,7 @@ from pathlib import Path
 from neocp_explorer import split_project_pluto_output, parse_ephemeris_table_for_ui
 
 
-DATA_DIR = Path("test_data")
+DATA_DIR = Path(__file__).resolve().parent / "tests" / "fixtures"
 
 
 def _load_fixture(filename: str) -> str:
@@ -52,13 +52,13 @@ def _assert_common_parse_ok(html: str, expected_name_hint: str) -> None:
 
 
 def test_parse_neocp_fixture() -> None:
-    html = _load_fixture("project_pluto_A11D0Xd.html")
-    _assert_common_parse_ok(html, "A11D0Xd")
+    html = _load_fixture("project_pluto_neocp_hourly_synthetic.html")
+    _assert_common_parse_ok(html, "TEST001")
 
 
 def test_parse_known_object_fixture() -> None:
-    html = _load_fixture("project_pluto_99942.html")
-    _assert_common_parse_ok(html, "99942")
+    html = _load_fixture("project_pluto_known_daily_synthetic.html")
+    _assert_common_parse_ok(html, "123456")
 
 
 def main() -> None:
