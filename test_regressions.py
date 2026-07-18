@@ -6,6 +6,10 @@ import fetch_project_pluto_test_data
 import neocp_explorer
 
 
+def test_app_version_matches_patch_release():
+    assert neocp_explorer.APP_VERSION == "3.1.1"
+
+
 class _FakeRoot:
     def __init__(self):
         self.callbacks = []

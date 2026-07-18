@@ -115,6 +115,7 @@ class Tooltip:
 # ---------------------------------------------------------------------------
 
 PROJECT_PLUTO_URL = "https://www.projectpluto.com/cgi-bin/fo/fo_serve.cgi"
+APP_VERSION = "3.1.1"
 LD_PER_AU = 389.17  # mean lunar distances per astronomical unit
 
 
@@ -216,7 +217,7 @@ def fetch_project_pluto_ephemeris(target_object, obs_code="X93", eph_steps=10, s
 
     headers = {
         "User-Agent": (
-            "NEOCP Explorer/3.1 "
+            f"NEOCP Explorer/{APP_VERSION} "
             "(https://github.com/Anduin-source/NEOCP_Explorer)"
         )
     }
@@ -1207,7 +1208,7 @@ class NEOTrackerApp:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("NEOCP Explorer v3.1")
+        self.root.title(f"NEOCP Explorer v{APP_VERSION}")
         self.root.geometry("1400x800")
         self.root.configure(bg=C['bg'])
         self.root.minsize(900, 600)
@@ -2403,7 +2404,7 @@ class NEOTrackerApp:
     def show_about(self):
         messagebox.showinfo(
             "About",
-            "NEOCP Explorer v3.1\n"
+            f"NEOCP Explorer v{APP_VERSION}\n"
             "Developed by Andre Brossel\n\n"
             "Ephemerides and orbital solutions:\n"
             "  Project Pluto / Find_Orb by Bill Gray\n"
