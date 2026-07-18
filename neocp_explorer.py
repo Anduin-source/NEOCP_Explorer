@@ -1008,12 +1008,12 @@ def parse_summary(elements_content, eph_content, target_object, object_category=
         (f"Object          : {target_object}\n", S),
         (f"Object category : {object_category}\n", S),
         (f"NEO sub-class   : {neo_subclass}\n", S),
-        (f"\n", S),
-        (f"── Physical ──────────────────────────────\n", S),
+        ("\n", S),
+        ("── Physical ──────────────────────────────\n", S),
         (f"Est. diameter   : {diameter} m  (10% albedo assumed)\n", S),
         (f"Abs. magnitude  : H = {h_mag}\n", S),
-        (f"\n", S),
-        (f"── Orbit ─────────────────────────────────\n", S),
+        ("\n", S),
+        ("── Orbit ─────────────────────────────────\n", S),
         (f"Semi-major axis : {a_au} AU\n", S),
         (f"Eccentricity    : {ecc_display}", S),
     ]
@@ -1046,16 +1046,17 @@ def parse_summary(elements_content, eph_content, target_object, object_category=
     blocks.append((f"Tisserand (T_E) : {tisserand}\n", S))
     if tisserand_jup != 'N/A':
         blocks.append((f"Tisserand (T_J) : {tisserand_jup}\n", S))
+    blocks.append((f"Dynamical class : {dyn_class}\n", S))
 
     blocks += [
-        (f"\n", S),
-        (f"── Geometry at First Ephemeris Line ──────\n", S),
+        ("\n", S),
+        ("── Geometry at First Ephemeris Line ──────\n", S),
         (f"Time            : {first_date}\n", S),
         (f"Distance Δ      : {first_delta_str}\n", S),
         (f"Solar distance r: {first_r_str}\n", S),
         (f"Elongation      : {first_elong_str}\n", S),
-        (f"\n", S),
-        (f"── Min. Distance in Ephemeris Window ─────\n", S),
+        ("\n", S),
+        ("── Min. Distance in Ephemeris Window ─────\n", S),
         (f"Time (min dist) : {closest_date}\n", S),
         (f"Min. distance   : {closest_delta_str}\n", S),
         (f"Magnitude       : {closest_mag}\n", S),
@@ -1063,8 +1064,8 @@ def parse_summary(elements_content, eph_content, target_object, object_category=
         (f"App. motion     : {closest_rate} arcsec/min\n", S),
         (f"Motion PA       : {closest_mot_pa}°\n", S),
         (f"Enc. velocity   : {enc_vel} km/s\n", S),
-        (f"\n", S),
-        (f"── Observations ──────────────────────────\n", S),
+        ("\n", S),
+        ("── Observations ──────────────────────────\n", S),
         (f"Used / total    : {obs_used} / {obs_total}\n", S),
         (f"Observed arc    : {obs_arc}\n", S),
         (f"Project Pluto score : {score}\n", S),
@@ -1173,7 +1174,8 @@ def extract_compact_orbital_elements(elements_content):
         m = re.search(pattern, text)
         return m.group(group).strip() if m else default
 
-    a = _get(r'\ba\s+([\d.]+)', elements_content)
+    # Hyperbolic heliocentric orbits have a negative semi-major axis.
+    a = _get(r'\ba\s+(-?[\d.]+)', elements_content)
     e = _get(r'\be\s+([\d.]+)', elements_content)
     inc = _get(r'Incl\.\s+([\d.]+)', elements_content)
     q = _get(r'\bq\s+([\d.]+)', elements_content)
@@ -1671,32 +1673,36 @@ class NEOTrackerApp:
             return
         if not self.validate_entries():
             return
-        self._processing = True
-        thread = threading.Thread(target=self.process_submission, daemon=True)
-        thread.start()
 
-    def process_submission(self):
+        # Tkinter widgets must only be accessed from the UI thread. Capture all
+        # form values before starting the network worker.
         target_object = self.target_object_entry.get().strip()
         obs_code = self.obs_code_entry.get().strip()
+        eph_steps = int(self.eph_steps_entry.get())
+        step_size = self.step_size_var.get().strip() or "1h"
 
+        self._processing = True
+        thread = threading.Thread(
+            target=self.process_submission,
+            args=(target_object, obs_code, eph_steps, step_size),
+            daemon=True,
+        )
+        thread.start()
+
+    def process_submission(self, target_object, obs_code, eph_steps, step_size):
         self.root.after(0, lambda: self.submit_button.configure(state='disabled'))
         self.root.after(0, lambda: self.progress.pack(pady=4))
         self.root.after(0, self.progress.start)
-        step_size_for_status = self.step_size_var.get().strip() if hasattr(self, 'step_size_var') else "1h"
         self.root.after(0, lambda: self.status_bar.config(
-            text=f"Querying Project Pluto online Find_Orb… step={step_size_for_status}"))
+            text=f"Querying Project Pluto online Find_Orb… step={step_size}"))
 
         try:
             # One remote workflow for both known NEOs and NEOCP tracklets.
             # No local executable, no OBS80 temporary files, no path configuration.
-            eph_steps_int = int(self.eph_steps_entry.get())
-
-            step_size = self.step_size_var.get().strip() or "1h"
-
             pp_html = fetch_project_pluto_ephemeris(
                 target_object=target_object,
                 obs_code=obs_code,
-                eph_steps=eph_steps_int,
+                eph_steps=eph_steps,
                 step_size=step_size,
             )
 
@@ -1909,7 +1915,7 @@ class NEOTrackerApp:
             self.root.after(0, lambda: self._populate_neocp_panel(data))
         except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching NEOCP: {e}")
-            self.root.after(0, lambda: self._neocp_load_error(str(e)))
+            self.root.after(0, self._neocp_load_error, str(e))
 
     def _populate_neocp_panel(self, data):
         try:
@@ -2154,13 +2160,13 @@ class NEOTrackerApp:
                 ))
             except Exception as exc:
                 logger.error("Cartes du Ciel slew failed: %s", exc)
+                error_message = str(exc)
                 self.root.after(0, lambda: self.status_bar.config(
                     text="Cartes du Ciel slew failed."
                 ))
-                self.root.after(0, lambda: messagebox.showerror(
+                self.root.after(0, messagebox.showerror,
                     "Cartes du Ciel slew failed",
-                    str(exc)
-                ))
+                    error_message)
 
         threading.Thread(target=worker, daemon=True).start()
 
